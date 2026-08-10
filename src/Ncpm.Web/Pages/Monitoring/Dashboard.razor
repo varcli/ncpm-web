@@ -1,0 +1,124 @@
+@page "/monitoring/dashboard"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@implements IDisposable
+@inject MonitorService MonitorService
+
+<PageHeader Title="监控仪表盘" Subtitle="系统和服务指标">
+    <PageHeaderExtra>
+        <Button OnClick="RefreshMetrics">刷新</Button>
+    </PageHeaderExtra>
+</PageHeader>
+
+<Row Gutter="16">
+    <Col Span="6">
+        <Card>
+            <Statistic Title="运行中容器" Value="@_metrics.RunningContainers" Suffix="@($"/{_metrics.ContainerCount}")" />
+        </Card>
+    </Col>
+    <Col Span="6">
+        <Card>
+            <Statistic Title="健康主机" Value="@_metrics.HealthyHosts" />
+        </Card>
+    </Col>
+    <Col Span="6">
+        <Card>
+            <Statistic Title="异常主机" Value="@_metrics.UnhealthyHosts" />
+        </Card>
+    </Col>
+    <Col Span="6">
+        <Card>
+            <Statistic Title="内存使用" Value="@FormatBytes(_metrics.MemoryUsed)" />
+        </Card>
+    </Col>
+</Row>
+
+<Row Gutter="16" Style="margin-top: 16px;">
+    <Col Span="12">
+        <Card Title="系统状态">
+            <Descriptions Bordered Column="1">
+                <DescriptionsItem Title="容器总数">
+                    @_metrics.ContainerCount
+                </DescriptionsItem>
+                <DescriptionsItem Title="运行中容器">
+                    <Tag Color="@("green")">@_metrics.RunningContainers</Tag>
+                </DescriptionsItem>
+                <DescriptionsItem Title="代理主机">
+                    @_metrics.ProxyHostCount
+                </DescriptionsItem>
+                <DescriptionsItem Title="健康主机">
+                    <Tag Color="@("green")">@_metrics.HealthyHosts</Tag>
+                </DescriptionsItem>
+                <DescriptionsItem Title="异常主机">
+                    <Tag Color="@(_metrics.UnhealthyHosts > 0 ? "red" : "default")">@_metrics.UnhealthyHosts</Tag>
+                </DescriptionsItem>
+                <DescriptionsItem Title="最后更新">
+                    @_metrics.Timestamp.ToString("yyyy-MM-dd HH:mm:ss")
+                </DescriptionsItem>
+            </Descriptions>
+        </Card>
+    </Col>
+    <Col Span="12">
+        <Card Title="快捷链接">
+            <Space Direction="@SpaceDirection.Vertical" Style="width: 100%">
+                <SpaceItem>
+                    <Button Block OnClick="@(() => Navigation.NavigateTo("/monitoring/health"))">
+                        查看健康检查
+                    </Button>
+                </SpaceItem>
+                <SpaceItem>
+                    <Button Block OnClick="@(() => Navigation.NavigateTo("/docker/containers"))">
+                        管理容器
+                    </Button>
+                </SpaceItem>
+                <SpaceItem>
+                    <Button Block OnClick="@(() => Navigation.NavigateTo("/proxy/hosts"))">
+                        管理代理主机
+                    </Button>
+                </SpaceItem>
+            </Space>
+        </Card>
+    </Col>
+</Row>
+
+@code {
+    [Inject] private NavigationManager Navigation { get; set; } = default!;
+    
+    private SystemMetrics _metrics = new();
+    private Timer? _refreshTimer;
+
+    protected override void OnInitialized()
+    {
+        RefreshMetrics();
+        _refreshTimer = new Timer(_ => InvokeAsync(() =>
+        {
+            RefreshMetrics();
+            StateHasChanged();
+        }), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    }
+
+    private void RefreshMetrics()
+    {
+        _metrics = MonitorService.GetCurrentMetrics();
+    }
+
+    private string FormatBytes(long bytes)
+    {
+        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
+        int order = 0;
+        double size = bytes;
+        while (size >= 1024 && order < sizes.Length - 1)
+        {
+            order++;
+            size /= 1024;
+        }
+        return $"{size:0.##} {sizes[order]}";
+    }
+
+    public void Dispose()
+    {
+        _refreshTimer?.Dispose();
+    }
+}

@@ -1,0 +1,172 @@
+@page "/docker/containers"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@inject DockerService DockerService
+@inject IMessageService Message
+@inject NavigationManager Navigation
+
+<PageHeader Title="Docker 容器" Subtitle="管理 Docker 容器">
+    <PageHeaderExtra>
+        <Select @bind-Value="@_selectedHostId" 
+                TItem="string" 
+                TItemValue="string"
+                Placeholder="全部主机"
+                Style="width: 200px; margin-right: 8px;"
+                AllowClear>
+            <SelectOptions>
+                @foreach (var host in _hosts)
+                {
+                    <SelectOption TItem="string" TItemValue="string" Value="@host.Id" Label="@host.Name" />
+                }
+            </SelectOptions>
+        </Select>
+        <Button Type="@ButtonType.Primary" OnClick="RefreshContainers">刷新</Button>
+    </PageHeaderExtra>
+</PageHeader>
+
+<Spin Spinning="@_loading">
+    <Table TItem="DockerContainer" DataSource="@_containers" RowKey="x => x.Id">
+        <PropertyColumn Property="c => c.Name" Title="名称">
+            <a @onclick="() => NavigateToDetail(context.Id, context.HostId)" style="cursor: pointer;">@context.Name</a>
+        </PropertyColumn>
+        <PropertyColumn Property="c => c.HostName" Title="主机">
+            <Tag>@context.HostName</Tag>
+        </PropertyColumn>
+        <PropertyColumn Property="c => c.Image" Title="镜像" />
+        <PropertyColumn Property="c => c.State" Title="状态">
+            <Tag Color="@(context.IsRunning ? "green" : context.IsStopped ? "red" : "orange")">
+                @DisplayText.ContainerState(context.State)
+            </Tag>
+        </PropertyColumn>
+        <PropertyColumn Property="c => c.Status" Title="状态详情">
+            @DisplayText.ContainerStatus(context.Status)
+        </PropertyColumn>
+        <PropertyColumn Property="c => c.Ports" Title="端口">
+            @foreach (var port in context.Ports.Where(p => p.PublicPort.HasValue).Take(3))
+            {
+                <Tag>@port.PublicPort:@port.PrivatePort</Tag>
+            }
+        </PropertyColumn>
+        <PropertyColumn Property="c => c.Created" Title="创建时间">
+            @context.Created.ToString("yyyy-MM-dd HH:mm")
+        </PropertyColumn>
+        <ActionColumn Title="操作">
+            <Space>
+                @if (context.IsRunning)
+                {
+                    <SpaceItem>
+                        <Button Size="@ButtonSize.Small" OnClick="() => NavigateToDetail(context.Id, context.HostId)">详情</Button>
+                    </SpaceItem>
+                    <SpaceItem>
+                        <Popconfirm Title="确定要停止此容器吗？" OnConfirm="() => StopContainer(context.Id, context.HostId)">
+                            <Button Size="@ButtonSize.Small" Danger>停止</Button>
+                        </Popconfirm>
+                    </SpaceItem>
+                    <SpaceItem>
+                        <Button Size="@ButtonSize.Small" OnClick="() => RestartContainer(context.Id, context.HostId)">重启</Button>
+                    </SpaceItem>
+                }
+                else
+                {
+                    <SpaceItem>
+                        <Button Size="@ButtonSize.Small" Type="@ButtonType.Primary" OnClick="() => StartContainer(context.Id, context.HostId)">启动</Button>
+                    </SpaceItem>
+                    <SpaceItem>
+                        <Popconfirm Title="确定要删除此容器吗？" OnConfirm="() => RemoveContainer(context.Id, context.HostId)">
+                            <Button Size="@ButtonSize.Small" Danger>删除</Button>
+                        </Popconfirm>
+                    </SpaceItem>
+                }
+            </Space>
+        </ActionColumn>
+    </Table>
+</Spin>
+
+@code {
+    private List<DockerContainer> _containers = new();
+    private List<DockerHost> _hosts = new();
+    private bool _loading = true;
+    private string? _selectedHostId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _hosts = DockerService.GetAllHosts();
+        await RefreshContainers();
+    }
+
+    private void NavigateToDetail(string containerId, string hostId)
+    {
+        Navigation.NavigateTo($"/docker/containers/{containerId}?host={hostId}");
+    }
+
+    private async Task RefreshContainers()
+    {
+        _loading = true;
+        try
+        {
+            _containers = await DockerService.ListContainersAsync(_selectedHostId);
+        }
+        catch (Exception ex)
+        {
+            Message.Error($"加载容器失败: {ex.Message}");
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task StartContainer(string containerId, string hostId)
+    {
+        if (await DockerService.StartContainerAsync(containerId, hostId))
+        {
+            Message.Success("容器已启动");
+            await RefreshContainers();
+        }
+        else
+        {
+            Message.Error("启动容器失败");
+        }
+    }
+
+    private async Task StopContainer(string containerId, string hostId)
+    {
+        if (await DockerService.StopContainerAsync(containerId, hostId))
+        {
+            Message.Success("容器已停止");
+            await RefreshContainers();
+        }
+        else
+        {
+            Message.Error("停止容器失败");
+        }
+    }
+
+    private async Task RestartContainer(string containerId, string hostId)
+    {
+        if (await DockerService.RestartContainerAsync(containerId, hostId))
+        {
+            Message.Success("容器已重启");
+            await RefreshContainers();
+        }
+        else
+        {
+            Message.Error("重启容器失败");
+        }
+    }
+
+    private async Task RemoveContainer(string containerId, string hostId)
+    {
+        if (await DockerService.RemoveContainerAsync(containerId, hostId, force: true))
+        {
+            Message.Success("容器已删除");
+            await RefreshContainers();
+        }
+        else
+        {
+            Message.Error("删除容器失败");
+        }
+    }
+}

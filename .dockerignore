@@ -1,0 +1,13 @@
+**/.git
+**/bin
+**/obj
+**/logs
+**/data
+**/.vs
+**/.vscode
+**/node_modules
+**/Thumbs.db
+**/*.user
+**/*.suo
+**/*.sln.docstates
+**/deploy/data

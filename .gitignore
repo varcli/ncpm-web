@@ -1,0 +1,83 @@
+# ---------------------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------------------
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+publish/
+[Pp]ublish[Oo]utput/
+*.dll
+*.exe
+*.pdb
+*.deps.json
+*.runtimeconfig.json
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+.packages/
+project.lock.json
+project.assets.json
+
+# ---------------------------------------------------------------------------
+# IDE / editor
+# ---------------------------------------------------------------------------
+.vs/
+.idea/
+*.user
+*.suo
+*.userprefs
+*.sln.docstates
+*.csproj.user
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------------------
+# Test output
+# ---------------------------------------------------------------------------
+[Tt]est[Rr]esults/
+coverage/
+*.coverage
+*.trx
+
+# ---------------------------------------------------------------------------
+# Runtime state — never commit. The panel writes its own config on first run
+# and treats it as the source of truth; deploy/init-config.yml is the template
+# that seeds it. users.yml holds password hashes and secrets/ holds session
+# tokens and ACME account keys.
+# ---------------------------------------------------------------------------
+/data/
+!deploy/init-config.yml
+
+# The panel resolves Config:Path relative to the content root, so a dev run
+# writes into src/Ncpm.Web/. These land beside source files, hence the
+# explicit paths rather than a bare pattern.
+src/Ncpm.Web/[Dd]ata/config/
+src/Ncpm.Web/[Dd]ata/secrets/
+src/Ncpm.Web/[Dd]ata/nginx/
+src/Ncpm.Web/[Dd]ata/certs/
+src/Ncpm.Web/[Dd]ata/acme/
+
+# Logs
+logs/
+*.log
+
+# Generated nginx configs and certificates
+deploy/data/
+*.pem
+*.key
+*.crt
+*.pfx
+
+# Local environment overrides (deploy/.env.example is the tracked template)
+.env
+.env.*
+!.env.example
+!deploy/.env.example
+appsettings.Local.json

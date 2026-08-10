@@ -1,0 +1,169 @@
+@page "/docker/images"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@inject DockerService DockerService
+@inject IMessageService Message
+
+<PageHeader Title="Docker 镜像" Subtitle="管理 Docker 镜像">
+    <PageHeaderExtra>
+        <Select @bind-Value="@_selectedHostId" 
+                TItem="string" 
+                TItemValue="string"
+                Placeholder="全部主机"
+                Style="width: 200px; margin-right: 8px;"
+                AllowClear>
+            <SelectOptions>
+                @foreach (var host in _hosts)
+                {
+                    <SelectOption TItem="string" TItemValue="string" Value="@host.Id" Label="@host.Name" />
+                }
+            </SelectOptions>
+        </Select>
+        <Button Type="@ButtonType.Primary" OnClick="ShowPullModal">拉取镜像</Button>
+        <Button OnClick="RefreshImages">刷新</Button>
+    </PageHeaderExtra>
+</PageHeader>
+
+<Spin Spinning="@_loading">
+    <Table TItem="DockerImage" DataSource="@_images" RowKey="x => x.Id">
+        <PropertyColumn Property="i => i.Repository" Title="仓库" />
+        <PropertyColumn Property="i => i.Tag" Title="标签">
+            <Tag>@context.Tag</Tag>
+        </PropertyColumn>
+        <PropertyColumn Property="i => i.HostName" Title="主机">
+            <Tag>@context.HostName</Tag>
+        </PropertyColumn>
+        <PropertyColumn Property="i => i.Id" Title="镜像 ID">
+            @context.Id[..Math.Min(12, context.Id.Length)]
+        </PropertyColumn>
+        <PropertyColumn Property="i => i.SizeFormatted" Title="大小" />
+        <PropertyColumn Property="i => i.Created" Title="创建时间">
+            @context.Created.ToString("yyyy-MM-dd HH:mm")
+        </PropertyColumn>
+        <ActionColumn Title="操作">
+            <Space>
+                <SpaceItem>
+                    <Popconfirm Title="确定要删除此镜像吗？" OnConfirm="() => RemoveImage(context.Id, context.HostId)">
+                        <Button Danger Size="@ButtonSize.Small">删除</Button>
+                    </Popconfirm>
+                </SpaceItem>
+            </Space>
+        </ActionColumn>
+    </Table>
+</Spin>
+
+<Modal Title="拉取镜像"
+       Visible="@_pullModalVisible"
+       OnOk="HandlePullImage"
+       OnCancel="() => _pullModalVisible = false">
+    <Form Model="@_pullModel">
+        <FormItem Label="主机">
+            <Select @bind-Value="@_pullModel.HostId" TItem="string" TItemValue="string">
+                <SelectOptions>
+                    @foreach (var host in _hosts.Where(h => h.IsEnabled))
+                    {
+                        <SelectOption TItem="string" TItemValue="string" Value="@host.Id" Label="@host.Name" />
+                    }
+                </SelectOptions>
+            </Select>
+        </FormItem>
+        <FormItem Label="仓库">
+            <Input @bind-Value="@_pullModel.Repository" Placeholder="例如 nginx、redis" />
+        </FormItem>
+        <FormItem Label="标签">
+            <Input @bind-Value="@_pullModel.Tag" Placeholder="latest" />
+        </FormItem>
+    </Form>
+</Modal>
+
+@code {
+    private List<DockerImage> _images = new();
+    private List<DockerHost> _hosts = new();
+    private bool _loading = true;
+    private bool _pullModalVisible;
+    private string? _selectedHostId;
+    private PullImageModel _pullModel = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        _hosts = DockerService.GetAllHosts();
+        await RefreshImages();
+    }
+
+    private async Task RefreshImages()
+    {
+        _loading = true;
+        try
+        {
+            _images = await DockerService.ListImagesAsync(_selectedHostId);
+        }
+        catch (Exception ex)
+        {
+            Message.Error($"加载镜像失败: {ex.Message}");
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private void ShowPullModal()
+    {
+        _pullModel = new PullImageModel 
+        { 
+            Tag = "latest",
+            HostId = _hosts.FirstOrDefault(h => h.IsDefault)?.Id ?? _hosts.FirstOrDefault()?.Id
+        };
+        _pullModalVisible = true;
+    }
+
+    private async Task HandlePullImage()
+    {
+        if (string.IsNullOrWhiteSpace(_pullModel.Repository))
+        {
+            Message.Warning("请输入仓库名称");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(_pullModel.HostId))
+        {
+            Message.Warning("请选择主机");
+            return;
+        }
+
+        _pullModalVisible = false;
+        Message.Info($"正在拉取镜像 {_pullModel.Repository}:{_pullModel.Tag}...");
+
+        if (await DockerService.PullImageAsync(_pullModel.Repository, _pullModel.Tag, _pullModel.HostId))
+        {
+            Message.Success("镜像拉取成功");
+            await RefreshImages();
+        }
+        else
+        {
+            Message.Error("拉取镜像失败");
+        }
+    }
+
+    private async Task RemoveImage(string imageId, string hostId)
+    {
+        if (await DockerService.RemoveImageAsync(imageId, hostId, force: true))
+        {
+            Message.Success("镜像已删除");
+            await RefreshImages();
+        }
+        else
+        {
+            Message.Error("删除镜像失败");
+        }
+    }
+
+    private class PullImageModel
+    {
+        public string? HostId { get; set; }
+        public string Repository { get; set; } = string.Empty;
+        public string Tag { get; set; } = "latest";
+    }
+}

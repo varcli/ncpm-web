@@ -1,0 +1,853 @@
+using System.Collections.Concurrent;
+using Docker.DotNet;
+using Docker.DotNet.Models;
+using Ncpm.Data;
+using YamlDotNet.Serialization;
+using YamlDotNet.Serialization.NamingConventions;
+
+namespace Ncpm.Services;
+
+public class DockerService : IDisposable
+{
+    private readonly ConfigService _configService;
+    private readonly ILogger<DockerService> _logger;
+    private readonly ConcurrentDictionary<string, DockerClient> _clients = new();
+    private readonly ConcurrentDictionary<string, DockerHostStatus> _hostStatuses = new();
+
+    // Previous CPU counters per container, needed to compute CPU% from one-shot samples.
+    private readonly ConcurrentDictionary<string, (ulong TotalUsage, ulong SystemUsage)> _previousCpuSamples = new();
+
+    // Hosts currently failing, keyed by host id, holding the last error message.
+    private readonly ConcurrentDictionary<string, string> _failingHosts = new();
+    private readonly string _hostsFilePath;
+    private List<DockerHost> _hosts = new();
+    private Timer? _healthCheckTimer;
+    private bool _disposed;
+
+    public event Action<string, DockerHostStatus>? OnHostStatusChanged;
+
+    public DockerService(ConfigService configService, ILogger<DockerService> logger)
+    {
+        _configService = configService;
+        _logger = logger;
+        _hostsFilePath = Path.Combine("data", "config", "docker-hosts.yml");
+        
+        LoadHosts();
+        EnsureDefaultHost();
+        InitializeClients();
+        StartHealthCheck();
+    }
+
+    private void LoadHosts()
+    {
+        if (!File.Exists(_hostsFilePath))
+        {
+            _hosts = new List<DockerHost>();
+            return;
+        }
+
+        try
+        {
+            var content = File.ReadAllText(_hostsFilePath);
+            var deserializer = new DeserializerBuilder()
+                .WithNamingConvention(CamelCaseNamingConvention.Instance)
+                .Build();
+            _hosts = deserializer.Deserialize<List<DockerHost>>(content) ?? new List<DockerHost>();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load Docker hosts");
+            _hosts = new List<DockerHost>();
+        }
+    }
+
+    private void SaveHosts()
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(_hostsFilePath);
+            if (!string.IsNullOrEmpty(dir))
+            {
+                Directory.CreateDirectory(dir);
+            }
+
+            var serializer = new SerializerBuilder()
+                .WithNamingConvention(CamelCaseNamingConvention.Instance)
+                .Build();
+            var content = serializer.Serialize(_hosts);
+            File.WriteAllText(_hostsFilePath, content);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to save Docker hosts");
+        }
+    }
+
+    private void EnsureDefaultHost()
+    {
+        if (_hosts.Any(h => h.IsDefault))
+            return;
+
+        var localHost = new DockerHost
+        {
+            Id = "local",
+            Name = "Local Docker",
+            Host = "unix:///var/run/docker.sock",
+            Type = DockerHostType.Local,
+            IsEnabled = true,
+            IsDefault = true,
+            Description = "Local Docker daemon",
+            CreatedAt = DateTime.UtcNow
+        };
+
+        _hosts.Add(localHost);
+        SaveHosts();
+    }
+
+    private void InitializeClients()
+    {
+        foreach (var host in _hosts.Where(h => h.IsEnabled))
+        {
+            try
+            {
+                var client = CreateClient(host);
+                _clients[host.Id] = client;
+                _logger.LogInformation("Initialized Docker client for {Host}", host.Name);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to initialize Docker client for {Host}", host.Name);
+                host.LastError = ex.Message;
+            }
+        }
+    }
+
+    private DockerClient CreateClient(DockerHost host)
+    {
+        var uri = new Uri(host.ConnectionString);
+        
+        var config = new DockerClientConfiguration(uri);
+        return config.CreateClient();
+    }
+
+    private void StartHealthCheck()
+    {
+        // Exceptions must not escape a timer callback, or they take down the process.
+        _healthCheckTimer = new Timer(async void (_) =>
+        {
+            try
+            {
+                await CheckAllHosts();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Docker host health sweep failed");
+            }
+        }, null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(30));
+    }
+
+    private async Task CheckAllHosts()
+    {
+        foreach (var host in _hosts.Where(h => h.IsEnabled))
+        {
+            await CheckHostHealth(host);
+        }
+    }
+
+    private async Task CheckHostHealth(DockerHost host)
+    {
+        if (!_clients.TryGetValue(host.Id, out var client))
+        {
+            return;
+        }
+
+        try
+        {
+            var info = await client.System.GetSystemInfoAsync();
+            var containers = await client.Containers.ListContainersAsync(new ContainersListParameters { All = true });
+
+            var status = new DockerHostStatus
+            {
+                HostId = host.Id,
+                HostName = host.Name,
+                IsConnected = true,
+                ContainerCount = containers.Count,
+                RunningContainers = containers.Count(c => c.State == "running"),
+                DockerVersion = info.ServerVersion,
+                OsType = info.OSType,
+                Architecture = info.Architecture,
+                TotalMemory = info.MemTotal,
+                CpuCount = (int)info.NCPU,
+                CheckedAt = DateTime.UtcNow
+            };
+
+            _hostStatuses[host.Id] = status;
+            host.IsConnected = true;
+            host.LastError = null;
+            host.LastChecked = DateTime.UtcNow;
+            host.ContainerCount = containers.Count;
+
+            OnHostStatusChanged?.Invoke(host.Id, status);
+        }
+        catch (Exception ex)
+        {
+            host.IsConnected = false;
+            host.LastError = ex.Message;
+            host.LastChecked = DateTime.UtcNow;
+
+            var status = new DockerHostStatus
+            {
+                HostId = host.Id,
+                HostName = host.Name,
+                IsConnected = false,
+                Error = ex.Message,
+                CheckedAt = DateTime.UtcNow
+            };
+
+            _hostStatuses[host.Id] = status;
+            OnHostStatusChanged?.Invoke(host.Id, status);
+        }
+    }
+
+    #region Host Management
+
+    public List<DockerHost> GetAllHosts()
+    {
+        return _hosts.ToList();
+    }
+
+    public DockerHost? GetHost(string hostId)
+    {
+        return _hosts.FirstOrDefault(h => h.Id == hostId);
+    }
+
+    public DockerHost? GetDefaultHost()
+    {
+        return _hosts.FirstOrDefault(h => h.IsDefault && h.IsEnabled);
+    }
+
+    public DockerHostStatus? GetHostStatus(string hostId)
+    {
+        return _hostStatuses.TryGetValue(hostId, out var status) ? status : null;
+    }
+
+    public List<DockerHostStatus> GetAllHostStatuses()
+    {
+        return _hostStatuses.Values.ToList();
+    }
+
+    public bool AddHost(DockerHost host)
+    {
+        if (_hosts.Any(h => h.Id == host.Id))
+        {
+            return false;
+        }
+
+        if (host.IsDefault)
+        {
+            foreach (var h in _hosts)
+            {
+                h.IsDefault = false;
+            }
+        }
+
+        _hosts.Add(host);
+        SaveHosts();
+
+        if (host.IsEnabled)
+        {
+            try
+            {
+                var client = CreateClient(host);
+                _clients[host.Id] = client;
+            }
+            catch (Exception ex)
+            {
+                host.LastError = ex.Message;
+            }
+        }
+
+        return true;
+    }
+
+    public bool UpdateHost(DockerHost host)
+    {
+        var existing = _hosts.FirstOrDefault(h => h.Id == host.Id);
+        if (existing == null)
+        {
+            return false;
+        }
+
+        if (host.IsDefault)
+        {
+            foreach (var h in _hosts)
+            {
+                h.IsDefault = false;
+            }
+        }
+
+        var index = _hosts.IndexOf(existing);
+        _hosts[index] = host;
+        SaveHosts();
+
+        // Reinitialize client if connection settings changed
+        if (existing.Host != host.Host || existing.Type != host.Type)
+        {
+            if (_clients.TryRemove(host.Id, out var oldClient))
+            {
+                oldClient.Dispose();
+            }
+
+            if (host.IsEnabled)
+            {
+                try
+                {
+                    var client = CreateClient(host);
+                    _clients[host.Id] = client;
+                }
+                catch (Exception ex)
+                {
+                    host.LastError = ex.Message;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    public bool DeleteHost(string hostId)
+    {
+        var host = _hosts.FirstOrDefault(h => h.Id == hostId);
+        if (host == null || host.IsDefault)
+        {
+            return false;
+        }
+
+        _hosts.Remove(host);
+        SaveHosts();
+
+        if (_clients.TryRemove(hostId, out var client))
+        {
+            client.Dispose();
+        }
+
+        _hostStatuses.TryRemove(hostId, out _);
+        return true;
+    }
+
+    public async Task<bool> TestConnection(DockerHost host)
+    {
+        try
+        {
+            using var client = CreateClient(host);
+            var info = await client.System.GetSystemInfoAsync();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Connection test failed for {Host}", host.Name);
+            return false;
+        }
+    }
+
+    #endregion
+
+    #region Container Operations
+
+    public async Task<List<DockerContainer>> ListContainersAsync(string? hostId = null, CancellationToken cancellationToken = default)
+    {
+        var hosts = string.IsNullOrEmpty(hostId) 
+            ? _hosts.Where(h => h.IsEnabled).ToList()
+            : _hosts.Where(h => h.Id == hostId && h.IsEnabled).ToList();
+
+        var allContainers = new List<DockerContainer>();
+
+        foreach (var host in hosts)
+        {
+            if (!_clients.TryGetValue(host.Id, out var client))
+                continue;
+
+            try
+            {
+                var containers = await client.Containers.ListContainersAsync(
+                    new ContainersListParameters { All = true }, cancellationToken);
+
+                var hostContainers = containers.Select(c => new DockerContainer
+                {
+                    Id = c.ID,
+                    Name = c.Names.FirstOrDefault()?.TrimStart('/') ?? string.Empty,
+                    Image = c.Image,
+                    State = c.State,
+                    Status = c.Status,
+                    Created = c.Created,
+                    Labels = c.Labels?.ToDictionary(l => l.Key, l => l.Value) ?? new(),
+                    Ports = c.Ports?.Select(p => new PortMapping
+                    {
+                        Ip = p.IP,
+                        PrivatePort = (int)p.PrivatePort,
+                        PublicPort = p.PublicPort > 0 ? (int)p.PublicPort : null,
+                        Type = p.Type
+                    }).ToList() ?? new(),
+                    HostId = host.Id,
+                    HostName = host.Name
+                }).ToList();
+
+                allContainers.AddRange(hostContainers);
+                ClearHostFailure(host);
+            }
+            catch (Exception ex)
+            {
+                LogHostFailure(host, ex, "list containers");
+            }
+        }
+
+        return allContainers;
+    }
+
+    /// <summary>
+    /// Logs a host failure once with full detail, then stays quiet while the host
+    /// remains down. Metrics collection polls every few seconds, so logging each
+    /// failure with a stack trace filled the log file for an offline host.
+    /// </summary>
+    private void LogHostFailure(DockerHost host, Exception ex, string operation)
+    {
+        if (_failingHosts.TryAdd(host.Id, ex.Message))
+        {
+            _logger.LogError(ex, "Failed to {Operation} from {Host}", operation, host.Name);
+            return;
+        }
+
+        // Message changed: report the new failure mode, still without the trace.
+        if (_failingHosts.TryGetValue(host.Id, out var previous) && previous != ex.Message)
+        {
+            _failingHosts[host.Id] = ex.Message;
+            _logger.LogWarning("Docker host {Host} still failing to {Operation}: {Error}",
+                host.Name, operation, ex.Message);
+        }
+        else
+        {
+            _logger.LogDebug("Docker host {Host} still failing to {Operation}", host.Name, operation);
+        }
+    }
+
+    private void ClearHostFailure(DockerHost host)
+    {
+        if (_failingHosts.TryRemove(host.Id, out _))
+        {
+            _logger.LogInformation("Docker host {Host} recovered", host.Name);
+        }
+    }
+
+    public async Task<DockerContainer?> GetContainerAsync(string containerId, string? hostId = null, CancellationToken cancellationToken = default)
+    {
+        var hosts = string.IsNullOrEmpty(hostId)
+            ? _hosts.Where(h => h.IsEnabled).ToList()
+            : _hosts.Where(h => h.Id == hostId && h.IsEnabled).ToList();
+
+        foreach (var host in hosts)
+        {
+            if (!_clients.TryGetValue(host.Id, out var client))
+                continue;
+
+            try
+            {
+                var inspect = await client.Containers.InspectContainerAsync(containerId, cancellationToken);
+                return new DockerContainer
+                {
+                    Id = inspect.ID,
+                    Name = inspect.Name?.TrimStart('/') ?? string.Empty,
+                    Image = inspect.Config.Image,
+                    State = inspect.State.Status,
+                    Status = inspect.State.Running ? "running" : "stopped",
+                    Created = inspect.Created,
+                    Labels = inspect.Config.Labels?.ToDictionary(l => l.Key, l => l.Value) ?? new(),
+                    HostId = host.Id,
+                    HostName = host.Name
+                };
+            }
+            catch (DockerContainerNotFoundException)
+            {
+                continue;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to get container {ContainerId} from {Host}", containerId, host.Name);
+            }
+        }
+
+        return null;
+    }
+
+    public async Task<bool> StartContainerAsync(string containerId, string hostId, CancellationToken cancellationToken = default)
+    {
+        if (!_clients.TryGetValue(hostId, out var client))
+            return false;
+
+        try
+        {
+            await client.Containers.StartContainerAsync(containerId, new ContainerStartParameters(), cancellationToken);
+            _logger.LogInformation("Started container {ContainerId} on {Host}", containerId, hostId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to start container {ContainerId} on {Host}", containerId, hostId);
+            return false;
+        }
+    }
+
+    public async Task<bool> StopContainerAsync(string containerId, string hostId, CancellationToken cancellationToken = default)
+    {
+        if (!_clients.TryGetValue(hostId, out var client))
+            return false;
+
+        try
+        {
+            await client.Containers.StopContainerAsync(containerId,
+                new ContainerStopParameters { WaitBeforeKillSeconds = 10 }, cancellationToken);
+            _logger.LogInformation("Stopped container {ContainerId} on {Host}", containerId, hostId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to stop container {ContainerId} on {Host}", containerId, hostId);
+            return false;
+        }
+    }
+
+    public async Task<bool> RestartContainerAsync(string containerId, string hostId, CancellationToken cancellationToken = default)
+    {
+        if (!_clients.TryGetValue(hostId, out var client))
+            return false;
+
+        try
+        {
+            await client.Containers.RestartContainerAsync(containerId,
+                new ContainerRestartParameters { WaitBeforeKillSeconds = 10 }, cancellationToken);
+            _logger.LogInformation("Restarted container {ContainerId} on {Host}", containerId, hostId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to restart container {ContainerId} on {Host}", containerId, hostId);
+            return false;
+        }
+    }
+
+    public async Task<bool> RemoveContainerAsync(string containerId, string hostId, bool force = false, CancellationToken cancellationToken = default)
+    {
+        if (!_clients.TryGetValue(hostId, out var client))
+            return false;
+
+        try
+        {
+            await client.Containers.RemoveContainerAsync(containerId,
+                new ContainerRemoveParameters { Force = force }, cancellationToken);
+            _logger.LogInformation("Removed container {ContainerId} on {Host}", containerId, hostId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to remove container {ContainerId} on {Host}", containerId, hostId);
+            return false;
+        }
+    }
+
+    public async Task<List<ContainerLogEntry>> GetContainerLogsAsync(string containerId, string hostId, int tail = 100, CancellationToken cancellationToken = default)
+    {
+        if (!_clients.TryGetValue(hostId, out var client))
+            return new List<ContainerLogEntry>();
+
+        try
+        {
+            // The multiplexed overload is required: for containers created without a
+            // TTY, Docker frames stdout/stderr with an 8-byte header per chunk. The
+            // obsolete overload returns those headers inline and corrupts every line.
+            using var stream = await client.Containers.GetContainerLogsAsync(containerId,
+                tty: false,
+                new ContainerLogsParameters
+                {
+                    ShowStdout = true,
+                    ShowStderr = true,
+                    Tail = tail.ToString(),
+                    Timestamps = true
+                }, cancellationToken);
+
+            var entries = new List<ContainerLogEntry>();
+            var (stdout, stderr) = await stream.ReadOutputToEndAsync(cancellationToken);
+
+            AppendLogLines(entries, stdout, "stdout");
+            AppendLogLines(entries, stderr, "stderr");
+
+            return entries.OrderBy(e => e.Timestamp).ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get logs for container {ContainerId}", containerId);
+            return new List<ContainerLogEntry>();
+        }
+    }
+
+    /// <summary>
+    /// Splits a demultiplexed log blob into entries, pulling the RFC3339 timestamp
+    /// prefix that Docker prepends when Timestamps is set.
+    /// </summary>
+    private static void AppendLogLines(List<ContainerLogEntry> entries, string? content, string streamName)
+    {
+        if (string.IsNullOrEmpty(content))
+            return;
+
+        foreach (var line in content.Split('\n'))
+        {
+            var trimmed = line.TrimEnd('\r');
+            if (string.IsNullOrWhiteSpace(trimmed))
+                continue;
+
+            var spaceIdx = trimmed.IndexOf(' ');
+            if (spaceIdx > 0 && DateTime.TryParse(
+                    trimmed[..spaceIdx],
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
+                    out var ts))
+            {
+                entries.Add(new ContainerLogEntry
+                {
+                    Timestamp = ts,
+                    Stream = streamName,
+                    Message = trimmed[(spaceIdx + 1)..]
+                });
+            }
+            else
+            {
+                entries.Add(new ContainerLogEntry
+                {
+                    Timestamp = DateTime.UtcNow,
+                    Stream = streamName,
+                    Message = trimmed
+                });
+            }
+        }
+    }
+
+    public async Task<ContainerStatsInfo?> GetContainerStatsAsync(string containerId, string hostId, CancellationToken cancellationToken = default)
+    {
+        if (!_clients.TryGetValue(hostId, out var client))
+            return null;
+
+        try
+        {
+            ContainerStatsResponse? sample = null;
+            var received = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            var progress = new Progress<ContainerStatsResponse>(response =>
+            {
+                sample ??= response;
+                received.TrySetResult(true);
+            });
+
+            // One-shot read via the typed progress API. The stream-returning overload
+            // is obsolete and required hand-parsing the JSON.
+            await client.Containers.GetContainerStatsAsync(containerId,
+                new ContainerStatsParameters { Stream = false },
+                progress,
+                cancellationToken);
+
+            if (sample == null)
+            {
+                // Progress may deliver slightly after the call returns.
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(TimeSpan.FromSeconds(5));
+                try
+                {
+                    await received.Task.WaitAsync(timeout.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    _logger.LogWarning("No stats sample received for container {ContainerId}", containerId);
+                    return null;
+                }
+            }
+
+            if (sample == null)
+                return null;
+
+            var stats = BuildStats(containerId, sample);
+            _previousCpuSamples[containerId] = (sample.CPUStats.CPUUsage.TotalUsage, sample.CPUStats.SystemUsage);
+            return stats;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get stats for container {ContainerId}", containerId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Maps a Docker stats sample onto <see cref="ContainerStatsInfo"/>.
+    /// With Stream=false Docker zeroes precpu_stats, so CPU% is derived from the
+    /// previous sample this service saw for the same container; the first reading
+    /// after startup therefore reports 0.
+    /// </summary>
+    private ContainerStatsInfo BuildStats(string containerId, ContainerStatsResponse response)
+    {
+        var stats = new ContainerStatsInfo
+        {
+            ContainerId = containerId,
+            Name = response.Name?.TrimStart('/') ?? string.Empty,
+            CollectedAt = DateTime.UtcNow
+        };
+
+        var totalUsage = response.CPUStats.CPUUsage.TotalUsage;
+        var systemUsage = response.CPUStats.SystemUsage;
+
+        var prevTotal = response.PreCPUStats.CPUUsage.TotalUsage;
+        var prevSystem = response.PreCPUStats.SystemUsage;
+
+        if (prevTotal == 0 && prevSystem == 0 &&
+            _previousCpuSamples.TryGetValue(containerId, out var cached))
+        {
+            prevTotal = cached.TotalUsage;
+            prevSystem = cached.SystemUsage;
+        }
+
+        if (totalUsage >= prevTotal && systemUsage > prevSystem)
+        {
+            var cpuDelta = (double)(totalUsage - prevTotal);
+            var sysDelta = (double)(systemUsage - prevSystem);
+            var onlineCpus = response.CPUStats.OnlineCPUs > 0
+                ? response.CPUStats.OnlineCPUs
+                : (uint)Math.Max(1, response.CPUStats.CPUUsage.PercpuUsage?.Count ?? 1);
+
+            stats.CpuPercent = cpuDelta / sysDelta * onlineCpus * 100;
+        }
+
+        stats.MemoryUsage = response.MemoryStats.Usage;
+        stats.MemoryLimit = response.MemoryStats.Limit;
+        stats.MemoryPercent = stats.MemoryLimit > 0
+            ? (double)stats.MemoryUsage / stats.MemoryLimit * 100
+            : 0;
+
+        if (response.Networks != null)
+        {
+            foreach (var net in response.Networks.Values)
+            {
+                stats.NetworkRx += net.RxBytes;
+                stats.NetworkTx += net.TxBytes;
+            }
+        }
+
+        if (response.BlkioStats?.IoServiceBytesRecursive != null)
+        {
+            foreach (var entry in response.BlkioStats.IoServiceBytesRecursive)
+            {
+                if (string.Equals(entry.Op, "read", StringComparison.OrdinalIgnoreCase))
+                    stats.BlockRead += entry.Value;
+                else if (string.Equals(entry.Op, "write", StringComparison.OrdinalIgnoreCase))
+                    stats.BlockWrite += entry.Value;
+            }
+        }
+
+        return stats;
+    }
+
+    #endregion
+
+    #region Image Operations
+
+    public async Task<List<DockerImage>> ListImagesAsync(string? hostId = null, CancellationToken cancellationToken = default)
+    {
+        var hosts = string.IsNullOrEmpty(hostId)
+            ? _hosts.Where(h => h.IsEnabled).ToList()
+            : _hosts.Where(h => h.Id == hostId && h.IsEnabled).ToList();
+
+        var allImages = new List<DockerImage>();
+
+        foreach (var host in hosts)
+        {
+            if (!_clients.TryGetValue(host.Id, out var client))
+                continue;
+
+            try
+            {
+                var images = await client.Images.ListImagesAsync(new ImagesListParameters { All = true }, cancellationToken);
+
+                var hostImages = images.Select(i => new DockerImage
+                {
+                    Id = i.ID,
+                    Repository = i.RepoTags?.FirstOrDefault()?.Split(':').FirstOrDefault() ?? "<none>",
+                    Tag = i.RepoTags?.FirstOrDefault()?.Split(':').LastOrDefault() ?? "<none>",
+                    Digest = i.RepoDigests?.FirstOrDefault() ?? string.Empty,
+                    Created = i.Created,
+                    Size = i.Size,
+                    Labels = i.Labels?.ToDictionary(l => l.Key, l => l.Value) ?? new(),
+                    HostId = host.Id,
+                    HostName = host.Name
+                }).ToList();
+
+                allImages.AddRange(hostImages);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to list images from {Host}", host.Name);
+            }
+        }
+
+        return allImages;
+    }
+
+    public async Task<bool> PullImageAsync(string repository, string tag, string hostId, CancellationToken cancellationToken = default)
+    {
+        if (!_clients.TryGetValue(hostId, out var client))
+            return false;
+
+        try
+        {
+            await client.Images.CreateImageAsync(
+                new ImagesCreateParameters { FromImage = repository, Tag = tag },
+                null,
+                new Progress<JSONMessage>(),
+                cancellationToken);
+            _logger.LogInformation("Pulled image {Repository}:{Tag} on {Host}", repository, tag, hostId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to pull image {Repository}:{Tag} on {Host}", repository, tag, hostId);
+            return false;
+        }
+    }
+
+    public async Task<bool> RemoveImageAsync(string imageId, string hostId, bool force = false, CancellationToken cancellationToken = default)
+    {
+        if (!_clients.TryGetValue(hostId, out var client))
+            return false;
+
+        try
+        {
+            await client.Images.DeleteImageAsync(imageId,
+                new ImageDeleteParameters { Force = force }, cancellationToken);
+            _logger.LogInformation("Removed image {ImageId} on {Host}", imageId, hostId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to remove image {ImageId} on {Host}", imageId, hostId);
+            return false;
+        }
+    }
+
+    #endregion
+
+    public void Dispose()
+    {
+        if (!_disposed)
+        {
+            _healthCheckTimer?.Dispose();
+            foreach (var client in _clients.Values)
+            {
+                client.Dispose();
+            }
+            _disposed = true;
+        }
+    }
+}

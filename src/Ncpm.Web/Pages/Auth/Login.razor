@@ -1,0 +1,97 @@
+@page "/login"
+@layout LoginLayout
+@using Microsoft.AspNetCore.Components.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@inject AuthService AuthService
+@inject NavigationManager Navigation
+@inject IMessageService Message
+@inject ILocalStorageService LocalStorage
+@inject AuthenticationStateProvider AuthStateProvider
+
+<div style="display: flex; justify-content: center; align-items: center; min-height: 100vh; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+    <Card Style="width: 400px; box-shadow: 0 8px 32px rgba(0,0,0,0.1);">
+        <div style="text-align: center; margin-bottom: 24px;">
+            <h2 style="margin: 0; color: #333;">Ncpm</h2>
+            <p style="color: #666; margin-top: 8px;">Nginx 反向代理管理面板</p>
+        </div>
+
+        <Form Model="@_loginRequest" OnFinish="HandleLogin">
+            <FormItem>
+                <Input @bind-Value="@_loginRequest.Username" 
+                       Placeholder="用户名"
+                       Size="@InputSize.Large"
+                       Prefix="@(_userIcon)" />
+            </FormItem>
+            <FormItem>
+                <InputPassword @bind-Value="@_loginRequest.Password" 
+                               Placeholder="密码"
+                               Size="@InputSize.Large"
+                               Prefix="@(_lockIcon)" />
+            </FormItem>
+            <FormItem>
+                <Button Type="@ButtonType.Primary" 
+                        HtmlType="submit" 
+                        Block 
+                        Size="@ButtonSize.Large"
+                        Loading="@_loading">
+                    登录
+                </Button>
+            </FormItem>
+        </Form>
+
+        @if (_showDefaultCredentials)
+        {
+            <Alert Type="@AlertType.Warning"
+                   ShowIcon="true"
+                   Message="默认凭据"
+                   Description="用户名: admin，密码: admin123。请尽快修改！" />
+        }
+    </Card>
+</div>
+
+@code {
+    private LoginRequest _loginRequest = new();
+    private bool _loading;
+    private bool _showDefaultCredentials = true;
+    private RenderFragment _userIcon =@<Icon Type="user" />;
+    private RenderFragment _lockIcon =@<Icon Type="lock" />;
+
+    private async Task HandleLogin()
+    {
+        if (string.IsNullOrWhiteSpace(_loginRequest.Username) || string.IsNullOrWhiteSpace(_loginRequest.Password))
+        {
+            Message.Warning("请输入用户名和密码");
+            return;
+        }
+
+        _loading = true;
+        try
+        {
+            var result = AuthService.Login(_loginRequest);
+            if (result.Success)
+            {
+                await LocalStorage.SetItemAsStringAsync("auth_token", result.Token!);
+                await LocalStorage.SetItemAsStringAsync("auth_user", result.User!.Username);
+
+                // Notify auth state change
+                ((AuthStateProvider)AuthStateProvider).NotifyUserAuthentication(result.Token!);
+
+                Message.Success("登录成功");
+                Navigation.NavigateTo("/");
+            }
+            else
+            {
+                Message.Error(result.ErrorMessage ?? "登录失败");
+            }
+        }
+        catch (Exception ex)
+        {
+            Message.Error($"登录错误: {ex.Message}");
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+}

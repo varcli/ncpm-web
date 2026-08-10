@@ -1,0 +1,277 @@
+@page "/docker/containers/{ContainerId}"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@inject DockerService DockerService
+@inject IMessageService Message
+
+<PageHeader Title="@($"容器: {_container?.Name ?? ContainerId}")"
+            OnBack="@(() => Navigation.NavigateTo("/docker/containers"))">
+    <PageHeaderExtra>
+        @if (_container?.IsRunning == true)
+        {
+            <Button Danger OnClick="StopContainer">停止</Button>
+            <Button OnClick="RestartContainer">重启</Button>
+        }
+        else
+        {
+            <Button Type="@ButtonType.Primary" OnClick="StartContainer">启动</Button>
+        }
+        <Button OnClick="RefreshContainer">刷新</Button>
+    </PageHeaderExtra>
+</PageHeader>
+
+<Spin Spinning="@_loading">
+    @if (_container != null)
+    {
+        <Tabs DefaultActiveKey="info" OnChange="OnTabChange">
+            <TabPane Key="info" Tab="容器信息">
+                <Card Style="margin-top: 16px;">
+                    <Descriptions Bordered Column="2">
+                        <DescriptionsItem Title="ID">@_container.Id[..12]</DescriptionsItem>
+                        <DescriptionsItem Title="名称">@_container.Name</DescriptionsItem>
+                        <DescriptionsItem Title="主机">
+                            <Tag>@_container.HostName</Tag>
+                        </DescriptionsItem>
+                        <DescriptionsItem Title="镜像">@_container.Image</DescriptionsItem>
+                        <DescriptionsItem Title="状态">
+                            <Tag Color="@(_container.IsRunning ? "green" : _container.IsStopped ? "red" : "orange")">
+                                @DisplayText.ContainerState(_container.State)
+                            </Tag>
+                        </DescriptionsItem>
+                        <DescriptionsItem Title="详情">@DisplayText.ContainerStatus(_container.Status)</DescriptionsItem>
+                        <DescriptionsItem Title="创建时间">@_container.Created.ToString("yyyy-MM-dd HH:mm:ss")</DescriptionsItem>
+                    </Descriptions>
+                </Card>
+
+                @if (_container.Ports.Any())
+                {
+                    <Card Title="端口" Style="margin-top: 16px;">
+                        <Table TItem="PortMapping" DataSource="@_container.Ports" Size="@TableSize.Small">
+                            <PropertyColumn Property="p => p.Ip" Title="IP" />
+                            <PropertyColumn Property="p => p.PrivatePort" Title="内部端口" />
+                            <PropertyColumn Property="p => p.PublicPort" Title="外部端口" />
+                            <PropertyColumn Property="p => p.Type" Title="协议" />
+                        </Table>
+                    </Card>
+                }
+
+                @if (_container.Labels.Any())
+                {
+                    <Card Title="标签" Style="margin-top: 16px;">
+                        <Table TItem="KeyValuePair<string, string>" DataSource="@_container.Labels.ToList()" Size="@TableSize.Small">
+                            <PropertyColumn Property="l => l.Key" Title="键" />
+                            <PropertyColumn Property="l => l.Value" Title="值" />
+                        </Table>
+                    </Card>
+                }
+            </TabPane>
+
+            <TabPane Key="logs" Tab="日志">
+                <Card Style="margin-top: 16px;">
+                    <div style="margin-bottom: 12px; display: flex; gap: 8px;">
+                        <AntDesign.InputNumber @bind-Value="_logTail" Min="10" Max="1000" Style="width: 120px;" Placeholder="行数" />
+                        <Button Type="@ButtonType.Primary" OnClick="LoadLogs">加载日志</Button>
+                        <Button OnClick="ClearLogs">清空</Button>
+                    </div>
+                    <div style="background: #1e1e1e; color: #d4d4d4; padding: 16px; border-radius: 4px; max-height: 500px; overflow-y: auto; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 13px; line-height: 1.5;">
+                        @if (_logs.Any())
+                        {
+                            @foreach (var entry in _logs)
+                            {
+                                <div style="@(entry.Stream == "stderr" ? "color: #f48771;" : "")">
+                                    <span style="color: #6a9955;">@entry.Timestamp.ToString("HH:mm:ss")</span>
+                                    @entry.Message
+                                </div>
+                            }
+                        }
+                        else
+                        {
+                            <div style="color: #808080;">暂无日志。点击"加载日志"查看。</div>
+                        }
+                    </div>
+                </Card>
+            </TabPane>
+
+            <TabPane Key="stats" Tab="统计">
+                <Card Style="margin-top: 16px;">
+                    @if (_stats != null)
+                    {
+                        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;">
+                            <Statistic Title="CPU 使用率" Value="@_stats.CpuPercent" Suffix="%" ValueStyle="color: #3f8600;" />
+                            <div>
+                                <Statistic Title="内存使用" Value="@_stats.MemoryUsageFormatted" />
+                                <div style="color: #999; font-size: 12px;">限制: @_stats.MemoryLimitFormatted</div>
+                            </div>
+                            <Statistic Title="网络接收" Value="@_stats.NetworkRxFormatted" />
+                            <Statistic Title="网络发送" Value="@_stats.NetworkTxFormatted" />
+                        </div>
+                        <Divider />
+                        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;">
+                            <Statistic Title="内存使用率" Value="@Math.Round(_stats.MemoryPercent, 1)" Suffix="%" />
+                            <Statistic Title="磁盘读取" Value="@FormatBytes(_stats.BlockRead)" />
+                            <Statistic Title="磁盘写入" Value="@FormatBytes(_stats.BlockWrite)" />
+                            <Statistic Title="采集时间" Value="@_stats.CollectedAt.ToLocalTime().ToString("HH:mm:ss")" />
+                        </div>
+                    }
+                    else
+                    {
+                        <div style="text-align: center; padding: 40px;">
+                            <Button Type="@ButtonType.Primary" OnClick="LoadStats">加载统计</Button>
+                        </div>
+                    }
+                </Card>
+            </TabPane>
+        </Tabs>
+    }
+    else if (!_loading)
+    {
+        <Card>
+            <div style="text-align: center; padding: 40px;">
+                <h3>容器未找到</h3>
+                <p>找不到请求的容器。</p>
+                <Button Type="@ButtonType.Primary" OnClick="@(() => Navigation.NavigateTo("/docker/containers"))">
+                    返回容器列表
+                </Button>
+            </div>
+        </Card>
+    }
+</Spin>
+
+@code {
+    [Parameter]
+    public string ContainerId { get; set; } = default!;
+
+    [SupplyParameterFromQuery]
+    public string? Host { get; set; }
+
+    [Inject] private NavigationManager Navigation { get; set; } = default!;
+
+    private DockerContainer? _container;
+    private bool _loading = true;
+    private List<ContainerLogEntry> _logs = new();
+    private ContainerStatsInfo? _stats;
+    private int _logTail = 100;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadContainer();
+    }
+
+    private async Task OnTabChange(string key)
+    {
+        if (key == "logs" && !_logs.Any())
+            await LoadLogs();
+        else if (key == "stats" && _stats == null)
+            await LoadStats();
+    }
+
+    private async Task LoadContainer()
+    {
+        _loading = true;
+        try
+        {
+            _container = await DockerService.GetContainerAsync(ContainerId, Host);
+        }
+        catch (Exception ex)
+        {
+            Message.Error($"加载容器失败: {ex.Message}");
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task LoadLogs()
+    {
+        if (_container == null) return;
+        try
+        {
+            _logs = await DockerService.GetContainerLogsAsync(ContainerId, _container.HostId, _logTail);
+            if (!_logs.Any())
+                Message.Info("暂无日志");
+        }
+        catch (Exception ex)
+        {
+            Message.Error($"加载日志失败: {ex.Message}");
+        }
+    }
+
+    private void ClearLogs()
+    {
+        _logs.Clear();
+    }
+
+    private async Task LoadStats()
+    {
+        if (_container == null) return;
+        try
+        {
+            _stats = await DockerService.GetContainerStatsAsync(ContainerId, _container.HostId);
+            if (_stats == null)
+                Message.Warning("无法获取统计信息（容器可能未运行）");
+        }
+        catch (Exception ex)
+        {
+            Message.Error($"加载统计失败: {ex.Message}");
+        }
+    }
+
+    private string FormatBytes(ulong bytes)
+    {
+        string[] sizes = ["B", "KB", "MB", "GB"];
+        int order = 0;
+        double size = bytes;
+        while (size >= 1024 && order < sizes.Length - 1) { order++; size /= 1024; }
+        return $"{size:0.##} {sizes[order]}";
+    }
+
+    private async Task RefreshContainer()
+    {
+        await LoadContainer();
+    }
+
+    private async Task StartContainer()
+    {
+        if (_container == null) return;
+        if (await DockerService.StartContainerAsync(ContainerId, _container.HostId))
+        {
+            Message.Success("容器已启动");
+            await LoadContainer();
+        }
+        else
+        {
+            Message.Error("启动容器失败");
+        }
+    }
+
+    private async Task StopContainer()
+    {
+        if (_container == null) return;
+        if (await DockerService.StopContainerAsync(ContainerId, _container.HostId))
+        {
+            Message.Success("容器已停止");
+            await LoadContainer();
+        }
+        else
+        {
+            Message.Error("停止容器失败");
+        }
+    }
+
+    private async Task RestartContainer()
+    {
+        if (_container == null) return;
+        if (await DockerService.RestartContainerAsync(ContainerId, _container.HostId))
+        {
+            Message.Success("容器已重启");
+            await LoadContainer();
+        }
+        else
+        {
+            Message.Error("重启容器失败");
+        }
+    }
+}

@@ -1,0 +1,241 @@
+@page "/docker/hosts"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@inject DockerService DockerService
+@inject IMessageService Message
+
+<PageHeader Title="Docker 主机" Subtitle="管理 Docker 主机连接">
+    <PageHeaderExtra>
+        <Button Type="@ButtonType.Primary" OnClick="ShowAddModal">添加主机</Button>
+        <Button OnClick="RefreshHosts">刷新</Button>
+    </PageHeaderExtra>
+</PageHeader>
+
+<Spin Spinning="@_loading">
+    <Table TItem="DockerHost" DataSource="@_hosts" RowKey="x => x.Id">
+        <PropertyColumn Property="h => h.Name" Title="名称">
+            <Space>
+                @if (context.IsDefault)
+                {
+                    <SpaceItem>
+                        <Tag Color="@("blue")">默认</Tag>
+                    </SpaceItem>
+                }
+                <SpaceItem>@context.Name</SpaceItem>
+            </Space>
+        </PropertyColumn>
+        <PropertyColumn Property="h => h.Type" Title="类型">
+            <Tag>@DisplayText.DockerHostType(context.Type)</Tag>
+        </PropertyColumn>
+        <PropertyColumn Property="h => h.Host" Title="连接地址">
+            @context.ConnectionString
+        </PropertyColumn>
+        <PropertyColumn Property="h => h.IsEnabled" Title="状态">
+            @if (context.IsEnabled)
+            {
+                <Tag Color="@(context.IsConnected ? "green" : "red")">
+                    @(context.IsConnected ? "已连接" : "未连接")
+                </Tag>
+            }
+            else
+            {
+                <Tag>已禁用</Tag>
+            }
+        </PropertyColumn>
+        <PropertyColumn Property="h => h.ContainerCount" Title="容器数">
+            @context.ContainerCount
+        </PropertyColumn>
+        <PropertyColumn Property="h => h.LastError" Title="错误信息">
+            @(context.LastError ?? "-")
+        </PropertyColumn>
+        <ActionColumn Title="操作">
+            <Space>
+                <SpaceItem>
+                    <Button Size="@ButtonSize.Small" OnClick="() => TestHost(context)">测试</Button>
+                </SpaceItem>
+                <SpaceItem>
+                    <Button Size="@ButtonSize.Small" OnClick="() => EditHost(context)">编辑</Button>
+                </SpaceItem>
+                @if (!context.IsDefault)
+                {
+                    <SpaceItem>
+                        <Popconfirm Title="确定要删除此主机吗？" OnConfirm="() => DeleteHost(context.Id)">
+                            <Button Size="@ButtonSize.Small" Danger>删除</Button>
+                        </Popconfirm>
+                    </SpaceItem>
+                }
+            </Space>
+        </ActionColumn>
+    </Table>
+</Spin>
+
+<Modal Title="@(_isNew ? "添加 Docker 主机" : "编辑 Docker 主机")"
+       Visible="@_modalVisible"
+       OnOk="HandleSubmit"
+       OnCancel="() => _modalVisible = false"
+       Width="700">
+    <Form Model="@_editingHost" Layout="@FormLayout.Vertical">
+        <FormItem Label="主机 ID">
+            <Input @bind-Value="@_editingHost.Id" Disabled="@(!_isNew)" />
+        </FormItem>
+        <FormItem Label="名称">
+            <Input @bind-Value="@_editingHost.Name" />
+        </FormItem>
+        
+        <FormItem Label="连接类型">
+            <Select @bind-Value="@_editingHost.Type" TItem="DockerHostType" TItemValue="DockerHostType">
+                <SelectOptions>
+                    <SelectOption TItem="DockerHostType" TItemValue="DockerHostType" Value="@DockerHostType.Local" Label="本地 Unix Socket" />
+                    <SelectOption TItem="DockerHostType" TItemValue="DockerHostType" Value="@DockerHostType.Tcp" Label="TCP" />
+                    <SelectOption TItem="DockerHostType" TItemValue="DockerHostType" Value="@DockerHostType.Ssh" Label="SSH" />
+                </SelectOptions>
+            </Select>
+        </FormItem>
+
+        @if (_editingHost.Type == DockerHostType.Tcp)
+        {
+            <FormItem Label="主机">
+                <Input @bind-Value="@_editingHost.Host" Placeholder="192.168.1.100" />
+            </FormItem>
+            <FormItem Label="端口">
+                <AntDesign.InputNumber @bind-Value="@_editingHost.TcpPort" Style="width: 100%" />
+            </FormItem>
+            <FormItem Label="使用 TLS">
+                <Switch @bind-Value="@_editingHost.UseTls" />
+            </FormItem>
+        }
+        else if (_editingHost.Type == DockerHostType.Ssh)
+        {
+            <FormItem Label="主机">
+                <Input @bind-Value="@_editingHost.Host" Placeholder="192.168.1.100" />
+            </FormItem>
+            <FormItem Label="SSH 端口">
+                <AntDesign.InputNumber @bind-Value="@_editingHost.SshPort" Style="width: 100%" />
+            </FormItem>
+            <FormItem Label="SSH 用户">
+                <Input @bind-Value="@_editingHost.SshUser" />
+            </FormItem>
+            <FormItem Label="SSH 密码">
+                <InputPassword @bind-Value="@_editingHost.SshPassword" />
+            </FormItem>
+            <FormItem Label="SSH 密钥路径">
+                <Input @bind-Value="@_editingHost.SshKeyPath" Placeholder="~/.ssh/id_rsa" />
+            </FormItem>
+        }
+
+        <FormItem Label="描述">
+            <Input @bind-Value="@_editingHost.Description" />
+        </FormItem>
+        
+        <FormItem Label="启用">
+            <Switch @bind-Value="@_editingHost.IsEnabled" />
+        </FormItem>
+        <FormItem Label="设为默认">
+            <Switch @bind-Value="@_editingHost.IsDefault" />
+        </FormItem>
+    </Form>
+</Modal>
+
+@code {
+    private List<DockerHost> _hosts = new();
+    private bool _loading = true;
+    private bool _modalVisible;
+    private bool _isNew;
+    private DockerHost _editingHost = new();
+
+    protected override void OnInitialized()
+    {
+        RefreshHosts();
+    }
+
+    private void RefreshHosts()
+    {
+        _loading = true;
+        _hosts = DockerService.GetAllHosts();
+        _loading = false;
+    }
+
+    private void ShowAddModal()
+    {
+        _isNew = true;
+        _editingHost = new DockerHost
+        {
+            Id = Guid.NewGuid().ToString("N")[..8],
+            Type = DockerHostType.Tcp,
+            IsEnabled = true,
+            TcpPort = 2375
+        };
+        _modalVisible = true;
+    }
+
+    private void EditHost(DockerHost host)
+    {
+        _isNew = false;
+        _editingHost = host;
+        _modalVisible = true;
+    }
+
+    private void HandleSubmit()
+    {
+        if (string.IsNullOrWhiteSpace(_editingHost.Id) || string.IsNullOrWhiteSpace(_editingHost.Name))
+        {
+            Message.Warning("请填写必填字段");
+            return;
+        }
+
+        if (_isNew)
+        {
+            if (DockerService.AddHost(_editingHost))
+            {
+                Message.Success("主机添加成功");
+            }
+            else
+            {
+                Message.Error("添加主机失败");
+            }
+        }
+        else
+        {
+            if (DockerService.UpdateHost(_editingHost))
+            {
+                Message.Success("主机更新成功");
+            }
+            else
+            {
+                Message.Error("更新主机失败");
+            }
+        }
+
+        _modalVisible = false;
+        RefreshHosts();
+    }
+
+    private async Task TestHost(DockerHost host)
+    {
+        Message.Info($"正在测试连接到 {host.Name}...");
+        
+        if (await DockerService.TestConnection(host))
+        {
+            Message.Success($"连接 {host.Name} 成功");
+        }
+        else
+        {
+            Message.Error($"连接 {host.Name} 失败");
+        }
+    }
+
+    private void DeleteHost(string hostId)
+    {
+        if (DockerService.DeleteHost(hostId))
+        {
+            Message.Success("主机已删除");
+            RefreshHosts();
+        }
+        else
+        {
+            Message.Error("删除主机失败");
+        }
+    }
+}

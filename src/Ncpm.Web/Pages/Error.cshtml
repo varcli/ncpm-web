@@ -1,0 +1,30 @@
+@page "/Error"
+@namespace Ncpm.Pages
+@using System.Diagnostics
+@addTagHelper *, Microsoft.AspNetCore.Mvc.TagHelpers
+@{
+    Layout = null;
+    var requestId = Activity.Current?.Id ?? HttpContext.TraceIdentifier;
+}
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>发生错误 - Ncpm</title>
+    <link href="_content/AntDesign/css/ant-design-blazor.css" rel="stylesheet" />
+</head>
+<body style="font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; padding: 48px; color: #333;">
+    <h1 style="margin-bottom: 8px;">发生了一个错误</h1>
+    <p style="color: #666;">请求处理失败。详细信息已写入服务端日志。</p>
+
+    <p style="color: #999; font-size: 13px;">
+        请求 ID：<code>@requestId</code>
+    </p>
+
+    <p style="margin-top: 32px;">
+        <a href="/">返回首页</a>
+    </p>
+</body>
+</html>

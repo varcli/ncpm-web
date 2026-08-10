@@ -1,0 +1,263 @@
+@page "/certificates"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@inject Ncpm.Services.ConfigService ConfigService
+@inject AcmeService AcmeService
+@inject IMessageService Message
+
+<PageHeader Title="SSL 证书" Subtitle="管理 SSL 证书">
+    <PageHeaderExtra>
+        <Button Type="@ButtonType.Primary" Icon="@IconType.Outline.Plus" OnClick="OpenUpload">上传证书</Button>
+        <Button Icon="@IconType.Outline.SafetyCertificate" OnClick="OpenAcme">ACME 自动申请</Button>
+    </PageHeaderExtra>
+</PageHeader>
+
+<Table TItem="CertificateConfig" DataSource="@_certificates" Loading="@_loading">
+    <PropertyColumn Property="c => c.Domain" Title="域名">
+        <a href="@($"https://{context.Domain}")" target="_blank">@context.Domain</a>
+    </PropertyColumn>
+    <PropertyColumn Property="c => c.Issuer" Title="颁发者" Width="120">
+        @(string.IsNullOrWhiteSpace(context.Issuer) ? "未知" : context.Issuer)
+    </PropertyColumn>
+    <PropertyColumn Property="c => c.Source" Title="来源" Width="100">
+        <Tag Color="@(context.Source == CertificateSource.Acme ? "green" : context.Source == CertificateSource.Manual ? "blue" : "orange")">
+            @DisplayText.CertificateSource(context.Source)
+        </Tag>
+    </PropertyColumn>
+    <PropertyColumn Property="c => c.NotBefore" Title="生效时间" Width="160">
+        @context.NotBefore.ToString("yyyy-MM-dd HH:mm")
+    </PropertyColumn>
+    <PropertyColumn Property="c => c.NotAfter" Title="过期时间" Width="160">
+        @context.NotAfter.ToString("yyyy-MM-dd HH:mm")
+    </PropertyColumn>
+    <PropertyColumn Property="c => c.IsExpired" Title="状态" Width="120">
+        @if (context.IsExpired)
+        {
+            <Tag Color="@("red")">已过期</Tag>
+        }
+        else if (context.IsExpiringSoon)
+        {
+            <Tag Color="@("orange")">@context.DaysUntilExpiry 天后过期</Tag>
+        }
+        else
+        {
+            <Tag Color="@("green")">有效 (@context.DaysUntilExpiry 天)</Tag>
+        }
+    </PropertyColumn>
+    <ActionColumn Title="操作" Width="180">
+        <Space>
+            @if (context.Source == CertificateSource.Acme)
+            {
+                <SpaceItem><Button Type="@ButtonType.Link" Icon="@IconType.Outline.Reload" OnClick="@(() => RenewCertificate(context))">续期</Button></SpaceItem>
+            }
+            <SpaceItem><Popconfirm Title="确认删除此证书？" OnConfirm="@(() => DeleteCertificate(context))" OkText="确认" CancelText="取消">
+                <Button Type="@ButtonType.Link" Danger Icon="@IconType.Outline.Delete">删除</Button>
+            </Popconfirm></SpaceItem>
+        </Space>
+    </ActionColumn>
+</Table>
+
+@* Upload Modal *@
+<Modal Title="上传证书" @bind-Visible="@_uploadVisible" OnOk="SaveUpload" OnCancel="CloseUpload">
+    <Form Model="@_uploadCert" Layout="@FormLayout.Vertical">
+        <FormItem Label="域名" Required>
+            <Input @bind-Value="@_uploadCert.Domain" Placeholder="example.com" />
+        </FormItem>
+        <FormItem Label="证书文件路径">
+            <Input @bind-Value="@_uploadCert.CertPath" Placeholder="/path/to/cert.pem" />
+        </FormItem>
+        <FormItem Label="私钥文件路径">
+            <Input @bind-Value="@_uploadCert.KeyPath" Placeholder="/path/to/key.pem" />
+        </FormItem>
+    </Form>
+</Modal>
+
+@* ACME Modal *@
+<Modal Title="ACME 自动申请证书" @bind-Visible="@_acmeVisible" Width="700" OnOk="IssueAcmeCert" OnCancel="CloseAcme">
+    <Form Model="@_acmeConfig" Layout="@FormLayout.Vertical">
+        <FormItem Label="邮箱" Required>
+            <Input @bind-Value="@_acmeConfig.Email" Placeholder="admin@example.com" />
+        </FormItem>
+        <FormItem Label="域名（每行一个）" Required>
+            <TextArea Rows="3" @bind-Value="@_acmeDomainsText" Placeholder="example.com&#10;*.example.com" />
+        </FormItem>
+        <FormItem Label="验证方式">
+            <Select @bind-Value="@_acmeConfig.Challenge" TItem="AcmeChallengeType" TItemValue="AcmeChallengeType">
+                <SelectOptions>
+                    <SelectOption TItem="AcmeChallengeType" TItemValue="AcmeChallengeType" Value="@AcmeChallengeType.Http01" Label="HTTP-01（需80端口）" />
+                    <SelectOption TItem="AcmeChallengeType" TItemValue="AcmeChallengeType" Value="@AcmeChallengeType.Dns01" Label="DNS-01（需DNS API）" />
+                </SelectOptions>
+            </Select>
+        </FormItem>
+        @if (_acmeConfig.Challenge == AcmeChallengeType.Dns01)
+        {
+            <FormItem Label="DNS 提供商">
+                <Select @bind-Value="@_acmeConfig.DnsProvider" TItem="string" TItemValue="string" Placeholder="选择 DNS 提供商">
+                    <SelectOptions>
+                        @foreach (var provider in AcmeService.GetDnsProviders())
+                        {
+                            <SelectOption TItem="string" TItemValue="string" Value="@provider.Name" Label="@provider.DisplayName" />
+                        }
+                    </SelectOptions>
+                </Select>
+            </FormItem>
+            @if (!string.IsNullOrEmpty(_acmeConfig.DnsProvider))
+            {
+                var provider = AcmeService.GetDnsProviders().FirstOrDefault(p => p.Name == _acmeConfig.DnsProvider);
+                if (provider != null)
+                {
+                    @foreach (var field in provider.RequiredFields)
+                    {
+                        <FormItem Label="@field">
+                            <InputPassword @bind-Value="@_dnsCredentials[field]" />
+                        </FormItem>
+                    }
+                }
+            }
+        }
+        <FormItem Label="CA 服务器">
+            <Select @bind-Value="@_acmeConfig.CaDirUrl" TItem="string" TItemValue="string">
+                <SelectOptions>
+                    <SelectOption TItem="string" TItemValue="string" Value="@("https://acme-v02.api.letsencrypt.org/directory")" Label="Let's Encrypt (生产)" />
+                    <SelectOption TItem="string" TItemValue="string" Value="@("https://acme-staging-v02.api.letsencrypt.org/directory")" Label="Let's Encrypt (测试)" />
+                    <SelectOption TItem="string" TItemValue="string" Value="@("https://acme.zerossl.com/v2/DV90")" Label="ZeroSSL" />
+                </SelectOptions>
+            </Select>
+        </FormItem>
+        <FormItem Label="密钥类型">
+            <Select @bind-Value="@_acmeConfig.CertificateKeyType" TItem="string" TItemValue="string">
+                <SelectOptions>
+                    <SelectOption TItem="string" TItemValue="string" Value="@("EC256")" Label="ECDSA P-256 (推荐)" />
+                    <SelectOption TItem="string" TItemValue="string" Value="@("EC384")" Label="ECDSA P-384" />
+                    <SelectOption TItem="string" TItemValue="string" Value="@("RS2048")" Label="RSA 2048" />
+                    <SelectOption TItem="string" TItemValue="string" Value="@("RS4096")" Label="RSA 4096" />
+                </SelectOptions>
+            </Select>
+        </FormItem>
+    </Form>
+</Modal>
+
+@code {
+    private List<CertificateConfig> _certificates = new();
+    private bool _loading = true;
+
+    // Upload
+    private bool _uploadVisible;
+    private CertificateConfig _uploadCert = new();
+
+    // ACME
+    private bool _acmeVisible;
+    private AcmeConfig _acmeConfig = new();
+    private string _acmeDomainsText = string.Empty;
+    private Dictionary<string, string> _dnsCredentials = new();
+
+    protected override void OnInitialized()
+    {
+        LoadCertificates();
+    }
+
+    private void LoadCertificates()
+    {
+        _loading = true;
+        _certificates = ConfigService.LoadCertificates();
+        _loading = false;
+    }
+
+    // Upload
+    private void OpenUpload()
+    {
+        _uploadCert = new CertificateConfig
+        {
+            Id = Guid.NewGuid().ToString("N")[..8],
+            Source = CertificateSource.Manual,
+            CreatedAt = DateTime.UtcNow
+        };
+        _uploadVisible = true;
+    }
+
+    private void CloseUpload() => _uploadVisible = false;
+
+    private void SaveUpload()
+    {
+        if (string.IsNullOrEmpty(_uploadCert.Domain))
+        {
+            Message.Warning("请输入域名");
+            return;
+        }
+
+        _uploadCert.NotBefore = DateTime.UtcNow;
+        _uploadCert.NotAfter = DateTime.UtcNow.AddDays(365);
+        _certificates.Add(_uploadCert);
+        ConfigService.SaveCertificates(_certificates);
+        _uploadVisible = false;
+        Message.Success("证书已上传");
+    }
+
+    // ACME
+    private void OpenAcme()
+    {
+        _acmeConfig = new AcmeConfig
+        {
+            Challenge = AcmeChallengeType.Http01,
+            CaDirUrl = "https://acme-v02.api.letsencrypt.org/directory",
+            CertificateKeyType = "EC256"
+        };
+        _acmeDomainsText = string.Empty;
+        _dnsCredentials = new();
+        _acmeVisible = true;
+    }
+
+    private void CloseAcme() => _acmeVisible = false;
+
+    private async Task IssueAcmeCert()
+    {
+        if (string.IsNullOrEmpty(_acmeConfig.Email) || string.IsNullOrEmpty(_acmeDomainsText))
+        {
+            Message.Warning("请填写邮箱和域名");
+            return;
+        }
+
+        _acmeConfig.Domains = _acmeDomainsText.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+        _acmeConfig.DnsCredentials = _dnsCredentials;
+
+        Message.Loading("正在申请证书...");
+        var success = await AcmeService.IssueCertificateAsync(_acmeConfig);
+
+        if (success)
+        {
+            Message.Success("证书申请成功");
+            LoadCertificates();
+            _acmeVisible = false;
+        }
+        else
+        {
+            Message.Error("证书申请失败，请检查日志");
+        }
+    }
+
+    // Renew
+    private async Task RenewCertificate(CertificateConfig cert)
+    {
+        Message.Loading("正在续期证书...");
+        var success = await AcmeService.RenewCertificateAsync(cert.Domain);
+        if (success)
+        {
+            Message.Success("证书续期成功");
+            LoadCertificates();
+        }
+        else
+        {
+            Message.Error("证书续期失败");
+        }
+    }
+
+    // Delete
+    private void DeleteCertificate(CertificateConfig cert)
+    {
+        _certificates.Remove(cert);
+        ConfigService.SaveCertificates(_certificates);
+        Message.Success("证书已删除");
+    }
+}

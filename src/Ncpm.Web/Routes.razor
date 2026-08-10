@@ -1,0 +1,27 @@
+﻿@namespace Ncpm
+@using Microsoft.AspNetCore.Components.Authorization
+@using Ncpm
+
+<CascadingAuthenticationState>
+    <Router AppAssembly="typeof(Program).Assembly">
+        <Found Context="routeData">
+            <CascadingValue Value="routeData">
+                <AuthorizeRouteView RouteData="routeData" DefaultLayout="typeof(Ncpm.Layouts.BasicLayout)">
+                    <NotAuthorized>
+                        @if (context.User.Identity?.IsAuthenticated != true)
+                        {
+                            <RedirectToLogin />
+                        }
+                        else
+                        {
+                            <p>您无权访问此资源。</p>
+                        }
+                    </NotAuthorized>
+                </AuthorizeRouteView>
+            </CascadingValue>
+            <FocusOnNavigate RouteData="routeData" Selector="h1" />
+        </Found>
+    </Router>
+</CascadingAuthenticationState>
+
+<AntContainer />

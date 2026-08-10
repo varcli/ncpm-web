@@ -1,0 +1,26 @@
+schemaVersion: "1"
+panel:
+  host: "0.0.0.0"
+  port: 8098
+  basePath: "/"
+docker:
+  host: "unix:///var/run/docker.sock"
+  apiTimeout: 30
+nginx:
+  configPath: "/etc/nginx"
+  generatedPath: "/app/data/nginx/generated"
+  activePath: "/app/data/nginx/active"
+  streamPath: "/app/data/nginx/stream"
+  certPath: "/app/data/certs"
+  executablePath: "nginx"
+security:
+  requireAuth: true
+  sessionTimeout: 3600
+  maxLoginAttempts: 5
+  lockoutDuration: 300
+logging:
+  level: "Information"
+  path: "/app/data/logs"
+  enableConsole: true
+  enableFile: true
+  retainDays: 30

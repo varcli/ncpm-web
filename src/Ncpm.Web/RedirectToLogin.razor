@@ -1,0 +1,11 @@
+@namespace Ncpm
+@inject NavigationManager Navigation
+
+@code {
+    protected override void OnInitialized()
+    {
+        // forceLoad: the login page uses a different layout, so a full reload
+        // avoids rendering it inside the authenticated shell.
+        Navigation.NavigateTo("/login", true);
+    }
+}

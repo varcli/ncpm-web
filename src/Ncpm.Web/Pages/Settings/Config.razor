@@ -1,0 +1,394 @@
+@page "/settings/config"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@inject Ncpm.Services.ConfigService ConfigService
+@inject IMessageService Message
+
+<PageHeader Title="系统配置" Subtitle="管理应用配置">
+    <PageHeaderExtra>
+        <Button Type="@ButtonType.Primary" OnClick="SaveConfig">保存更改</Button>
+        <Button OnClick="ResetConfig">重置</Button>
+    </PageHeaderExtra>
+</PageHeader>
+
+<Tabs DefaultActiveKey="1">
+    <TabPane Key="1" Tab="通用">
+        <Card Title="面板设置">
+            <Form Model="@_config" Layout="@FormLayout.Vertical">
+                <Row Gutter="16">
+                    <AntDesign.Col Span="12">
+                        <FormItem Label="主机">
+                            <Input @bind-Value="@_config.Panel.Host" />
+                        </FormItem>
+                    </AntDesign.Col>
+                    <AntDesign.Col Span="12">
+                        <FormItem Label="端口">
+                            <AntDesign.InputNumber @bind-Value="@_config.Panel.Port" Style="width: 100%" />
+                        </FormItem>
+                    </AntDesign.Col>
+                </Row>
+                <FormItem Label="基础路径">
+                    <Input @bind-Value="@_config.Panel.BasePath" />
+                </FormItem>
+            </Form>
+        </Card>
+    </TabPane>
+
+    <TabPane Key="2" Tab="Docker">
+        <Card Title="Docker 设置">
+            <Form Model="@_config" Layout="@FormLayout.Vertical">
+                <FormItem Label="Docker 主机">
+                    <Input @bind-Value="@_config.Docker.Host" Placeholder="unix:///var/run/docker.sock" />
+                </FormItem>
+                <FormItem Label="API 超时（秒）">
+                    <AntDesign.InputNumber @bind-Value="@_config.Docker.ApiTimeout" Style="width: 100%" />
+                </FormItem>
+            </Form>
+        </Card>
+    </TabPane>
+
+    <TabPane Key="3" Tab="Nginx">
+        <Card Title="Nginx 设置">
+            <Form Model="@_config" Layout="@FormLayout.Vertical">
+                <FormItem Label="配置路径">
+                    <Input @bind-Value="@_config.Nginx.ConfigPath" />
+                </FormItem>
+                <FormItem Label="生成路径">
+                    <Input @bind-Value="@_config.Nginx.GeneratedPath" />
+                </FormItem>
+                <FormItem Label="激活路径">
+                    <Input @bind-Value="@_config.Nginx.ActivePath" />
+                </FormItem>
+                <FormItem Label="证书路径">
+                    <Input @bind-Value="@_config.Nginx.CertPath" />
+                </FormItem>
+                <FormItem Label="可执行文件路径">
+                    <Input @bind-Value="@_config.Nginx.ExecutablePath" />
+                </FormItem>
+            </Form>
+        </Card>
+    </TabPane>
+
+    <TabPane Key="4" Tab="日志">
+        <Card Title="日志设置">
+            <Form Model="@_config" Layout="@FormLayout.Vertical">
+                <FormItem Label="日志级别">
+                    <Select @bind-Value="@_config.Logging.Level" TItem="string" TItemValue="string">
+                        <SelectOptions>
+                            <SelectOption TItem="string" TItemValue="string" Value="@("Verbose")" Label="详细 (Verbose)" />
+                            <SelectOption TItem="string" TItemValue="string" Value="@("Debug")" Label="调试 (Debug)" />
+                            <SelectOption TItem="string" TItemValue="string" Value="@("Information")" Label="信息 (Information)" />
+                            <SelectOption TItem="string" TItemValue="string" Value="@("Warning")" Label="警告 (Warning)" />
+                            <SelectOption TItem="string" TItemValue="string" Value="@("Error")" Label="错误 (Error)" />
+                        </SelectOptions>
+                    </Select>
+                </FormItem>
+                <FormItem Label="日志路径">
+                    <Input @bind-Value="@_config.Logging.Path" />
+                </FormItem>
+                <FormItem Label="启用控制台日志">
+                    <Switch @bind-Value="@_config.Logging.EnableConsole" />
+                </FormItem>
+                <FormItem Label="启用文件日志">
+                    <Switch @bind-Value="@_config.Logging.EnableFile" />
+                </FormItem>
+                <FormItem Label="保留天数">
+                    <AntDesign.InputNumber @bind-Value="@_config.Logging.RetainDays" Style="width: 100%" />
+                </FormItem>
+            </Form>
+        </Card>
+    </TabPane>
+
+    <TabPane Key="5" Tab="安全">
+        <Card Title="安全设置">
+            <Form Model="@_config" Layout="@FormLayout.Vertical">
+                <FormItem Label="启用认证">
+                    <Switch @bind-Value="@_config.Security.RequireAuth" />
+                </FormItem>
+                <FormItem Label="会话超时（秒）">
+                    <AntDesign.InputNumber @bind-Value="@_config.Security.SessionTimeout" Style="width: 100%" />
+                </FormItem>
+                <FormItem Label="最大登录尝试次数">
+                    <AntDesign.InputNumber @bind-Value="@_config.Security.MaxLoginAttempts" Style="width: 100%" />
+                </FormItem>
+                <FormItem Label="锁定时长（秒）">
+                    <AntDesign.InputNumber @bind-Value="@_config.Security.LockoutDuration" Style="width: 100%" />
+                </FormItem>
+            </Form>
+        </Card>
+
+        <Card Title="ACL 访问控制" Style="margin-top: 16px;">
+            <Form Model="@_config.Acl" Layout="@FormLayout.Vertical">
+                <Row Gutter="16">
+                    <AntDesign.Col Span="8">
+                        <FormItem Label="默认策略">
+                            <Select @bind-Value="@_config.Acl.DefaultPolicy" TItem="string" TItemValue="string">
+                                <SelectOptions>
+                                    <SelectOption TItem="string" TItemValue="string" Value="@("allow")" Label="允许" />
+                                    <SelectOption TItem="string" TItemValue="string" Value="@("deny")" Label="拒绝" />
+                                </SelectOptions>
+                            </Select>
+                        </FormItem>
+                    </AntDesign.Col>
+                    <AntDesign.Col Span="8">
+                        <FormItem Label="允许本地网络">
+                            <Switch @bind-Value="@_config.Acl.AllowLocal" />
+                        </FormItem>
+                    </AntDesign.Col>
+                    <AntDesign.Col Span="8">
+                        <FormItem Label="启用日志">
+                            <Switch @bind-Value="@_config.Acl.EnableLogging" />
+                        </FormItem>
+                    </AntDesign.Col>
+                </Row>
+
+                <Divider>允许规则</Divider>
+                @foreach (var rule in _config.Acl.Allow)
+                {
+                    <Row Gutter="8" Style="margin-bottom: 8px;">
+                        <AntDesign.Col Span="8">
+                            <Select @bind-Value="@rule.Type" TItem="AclMatchType" TItemValue="AclMatchType">
+                                <SelectOptions>
+                                    <SelectOption TItem="AclMatchType" TItemValue="AclMatchType" Value="@AclMatchType.Ip" Label="IP" />
+                                    <SelectOption TItem="AclMatchType" TItemValue="AclMatchType" Value="@AclMatchType.Cidr" Label="CIDR" />
+                                </SelectOptions>
+                            </Select>
+                        </AntDesign.Col>
+                        <AntDesign.Col Span="12">
+                            <Input @bind-Value="@rule.Value" Placeholder="192.168.1.0/24" />
+                        </AntDesign.Col>
+                        <AntDesign.Col Span="4">
+                            <Button Danger OnClick="@(() => _config.Acl.Allow.Remove(rule))">删除</Button>
+                        </AntDesign.Col>
+                    </Row>
+                }
+                <Button Type="@ButtonType.Dashed" OnClick="@(() => _config.Acl.Allow.Add(new AclRule()))" Style="width: 100%;">
+                    + 添加允许规则
+                </Button>
+
+                <Divider>拒绝规则</Divider>
+                @foreach (var rule in _config.Acl.Deny)
+                {
+                    <Row Gutter="8" Style="margin-bottom: 8px;">
+                        <AntDesign.Col Span="8">
+                            <Select @bind-Value="@rule.Type" TItem="AclMatchType" TItemValue="AclMatchType">
+                                <SelectOptions>
+                                    <SelectOption TItem="AclMatchType" TItemValue="AclMatchType" Value="@AclMatchType.Ip" Label="IP" />
+                                    <SelectOption TItem="AclMatchType" TItemValue="AclMatchType" Value="@AclMatchType.Cidr" Label="CIDR" />
+                                </SelectOptions>
+                            </Select>
+                        </AntDesign.Col>
+                        <AntDesign.Col Span="12">
+                            <Input @bind-Value="@rule.Value" Placeholder="10.0.0.1" />
+                        </AntDesign.Col>
+                        <AntDesign.Col Span="4">
+                            <Button Danger OnClick="@(() => _config.Acl.Deny.Remove(rule))">删除</Button>
+                        </AntDesign.Col>
+                    </Row>
+                }
+                <Button Type="@ButtonType.Dashed" OnClick="@(() => _config.Acl.Deny.Add(new AclRule()))" Style="width: 100%;">
+                    + 添加拒绝规则
+                </Button>
+            </Form>
+        </Card>
+
+        <Card Title="限流设置" Style="margin-top: 16px;">
+            <Form Model="@_config.RateLimit" Layout="@FormLayout.Vertical">
+                <FormItem Label="启用限流">
+                    <Switch @bind-Value="@_config.RateLimit.Enabled" />
+                </FormItem>
+                <Row Gutter="16">
+                    <AntDesign.Col Span="8">
+                        <FormItem Label="每周期请求数">
+                            <AntDesign.InputNumber @bind-Value="@_config.RateLimit.Average" Style="width: 100%" />
+                        </FormItem>
+                    </AntDesign.Col>
+                    <AntDesign.Col Span="8">
+                        <FormItem Label="突发容量">
+                            <AntDesign.InputNumber @bind-Value="@_config.RateLimit.Burst" Style="width: 100%" />
+                        </FormItem>
+                    </AntDesign.Col>
+                    <AntDesign.Col Span="8">
+                        <FormItem Label="周期（秒）">
+                            <AntDesign.InputNumber @bind-Value="@_config.RateLimit.PeriodSeconds" Style="width: 100%" />
+                        </FormItem>
+                    </AntDesign.Col>
+                </Row>
+            </Form>
+        </Card>
+    </TabPane>
+
+    <TabPane Key="6" Tab="OIDC">
+        <Card Title="OpenID Connect 认证">
+            <Form Model="@_oidcConfig" Layout="@FormLayout.Vertical">
+                <FormItem Label="启用 OIDC">
+                    <Switch @bind-Value="@_oidcConfig.Enabled" />
+                </FormItem>
+                <FormItem Label="颁发者地址 (Authority)">
+                    <Input @bind-Value="@_oidcConfig.Authority" Placeholder="https://accounts.google.com" />
+                </FormItem>
+                <Row Gutter="16">
+                    <AntDesign.Col Span="12">
+                        <FormItem Label="客户端 ID">
+                            <Input @bind-Value="@_oidcConfig.ClientId" />
+                        </FormItem>
+                    </AntDesign.Col>
+                    <AntDesign.Col Span="12">
+                        <FormItem Label="客户端密钥">
+                            <InputPassword @bind-Value="@_oidcConfig.ClientSecret" />
+                        </FormItem>
+                    </AntDesign.Col>
+                </Row>
+                <FormItem Label="回调地址 (Redirect URI)">
+                    <Input @bind-Value="@_oidcConfig.RedirectUri" Placeholder="https://your-domain/auth/callback" />
+                </FormItem>
+                <FormItem Label="授权范围 (Scopes，逗号分隔)">
+                    <Input @bind-Value="@_scopesText" Placeholder="openid,profile,email" />
+                </FormItem>
+                <FormItem Label="允许用户（逗号分隔）">
+                    <Input @bind-Value="@_allowedUsersText" Placeholder="user1,user2" />
+                </FormItem>
+                <FormItem Label="允许组（逗号分隔）">
+                    <Input @bind-Value="@_allowedGroupsText" Placeholder="admin,editors" />
+                </FormItem>
+            </Form>
+        </Card>
+    </TabPane>
+
+    <TabPane Key="7" Tab="通知">
+        <Card Title="通知设置">
+            <Form Model="@_config.Notification" Layout="@FormLayout.Vertical">
+                <FormItem Label="启用通知">
+                    <Switch @bind-Value="@_config.Notification.Enabled" />
+                </FormItem>
+            </Form>
+        </Card>
+
+        @foreach (var provider in _config.Notification.Providers)
+        {
+            <Card Title="@($"通知提供者: {provider.Name}")" Style="margin-top: 16px;">
+                <Form Model="@provider" Layout="@FormLayout.Vertical">
+                    <Row Gutter="16">
+                        <AntDesign.Col Span="8">
+                            <FormItem Label="名称">
+                                <Input @bind-Value="@provider.Name" />
+                            </FormItem>
+                        </AntDesign.Col>
+                        <AntDesign.Col Span="8">
+                            <FormItem Label="类型">
+                                <Select @bind-Value="@provider.Type" TItem="NotifyProviderType" TItemValue="NotifyProviderType">
+                                    <SelectOptions>
+                                        <SelectOption TItem="NotifyProviderType" TItemValue="NotifyProviderType" Value="@NotifyProviderType.Webhook" Label="Webhook" />
+                                        <SelectOption TItem="NotifyProviderType" TItemValue="NotifyProviderType" Value="@NotifyProviderType.Gotify" Label="Gotify" />
+                                        <SelectOption TItem="NotifyProviderType" TItemValue="NotifyProviderType" Value="@NotifyProviderType.Ntfy" Label="ntfy.sh" />
+                                    </SelectOptions>
+                                </Select>
+                            </FormItem>
+                        </AntDesign.Col>
+                        <AntDesign.Col Span="8">
+                            <FormItem Label="启用">
+                                <Switch @bind-Value="@provider.IsEnabled" />
+                            </FormItem>
+                        </AntDesign.Col>
+                    </Row>
+                    <FormItem Label="URL">
+                        <Input @bind-Value="@provider.Url" Placeholder="https://gotify.example.com" />
+                    </FormItem>
+                    @if (provider.Type == NotifyProviderType.Gotify || provider.Type == NotifyProviderType.Ntfy)
+                    {
+                        <FormItem Label="访问令牌 (Token)">
+                            <InputPassword @bind-Value="@provider.Token" />
+                        </FormItem>
+                    }
+                    @if (provider.Type == NotifyProviderType.Ntfy)
+                    {
+                        <FormItem Label="主题 (Topic)">
+                            <Input @bind-Value="@provider.Topic" Placeholder="ncpm-alerts" />
+                        </FormItem>
+                    }
+                    <FormItem>
+                        <Button Danger OnClick="@(() => _config.Notification.Providers.Remove(provider))">删除此提供者</Button>
+                    </FormItem>
+                </Form>
+            </Card>
+        }
+
+        <Button Type="@ButtonType.Dashed" OnClick="AddNotifyProvider" Style="width: 100%; margin-top: 16px;">
+            + 添加通知提供者
+        </Button>
+    </TabPane>
+
+    <TabPane Key="8" Tab="原始配置">
+        <Card Title="原始配置 (YAML)">
+            <TextArea Rows="20" @bind-Value="@_rawConfig" />
+        </Card>
+    </TabPane>
+</Tabs>
+
+@code {
+    private AppConfig _config = new();
+    private OidcConfig _oidcConfig = new();
+    private string _rawConfig = string.Empty;
+    private string _scopesText = "openid,profile,email";
+    private string _allowedUsersText = "";
+    private string _allowedGroupsText = "";
+
+    protected override void OnInitialized()
+    {
+        LoadConfig();
+    }
+
+    private void LoadConfig()
+    {
+        _config = ConfigService.LoadAppConfig();
+        _oidcConfig = _config.Oidc ?? new OidcConfig();
+        _scopesText = string.Join(",", _oidcConfig.Scopes);
+        _allowedUsersText = string.Join(",", _oidcConfig.AllowedUsers);
+        _allowedGroupsText = string.Join(",", _oidcConfig.AllowedGroups);
+        UpdateRawConfig();
+    }
+
+    private void UpdateRawConfig()
+    {
+        var serializer = new YamlDotNet.Serialization.SerializerBuilder()
+            .WithNamingConvention(YamlDotNet.Serialization.NamingConventions.CamelCaseNamingConvention.Instance)
+            .Build();
+        _rawConfig = serializer.Serialize(_config);
+    }
+
+    private void SaveConfig()
+    {
+        try
+        {
+            // Sync OIDC config back
+            _oidcConfig.Scopes = _scopesText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+            _oidcConfig.AllowedUsers = _allowedUsersText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+            _oidcConfig.AllowedGroups = _allowedGroupsText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+            _config.Oidc = _oidcConfig;
+
+            ConfigService.SaveAppConfig(_config);
+            Message.Success("配置保存成功");
+        }
+        catch (Exception ex)
+        {
+            Message.Error($"保存配置失败: {ex.Message}");
+        }
+    }
+
+    private void ResetConfig()
+    {
+        LoadConfig();
+        Message.Info("配置已重置为保存状态");
+    }
+
+    private void AddNotifyProvider()
+    {
+        _config.Notification.Providers.Add(new NotifyProvider
+        {
+            Name = $"provider-{_config.Notification.Providers.Count + 1}",
+            Type = NotifyProviderType.Webhook
+        });
+    }
+}

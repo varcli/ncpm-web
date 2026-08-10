@@ -1,0 +1,29 @@
+services:
+  panel:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    container_name: ncpm-panel
+    restart: unless-stopped
+    ports:
+      # Panel WebUI
+      - "8098:8098"
+      # Proxied HTTP/HTTPS traffic
+      - "80:80"
+      - "443:443"
+      # TCP/UDP stream hosts need their listen ports published here as well,
+      # e.g. - "5432:5432"
+    volumes:
+      - ./deploy/data:/app/data
+      # Read-only socket mount. A restricted Docker socket proxy is the safer
+      # option for anything exposed beyond a trusted network.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:8098
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8098/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

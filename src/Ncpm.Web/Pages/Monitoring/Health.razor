@@ -1,0 +1,127 @@
+@page "/monitoring/health"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@implements IDisposable
+@inject HealthCheckService HealthCheckService
+@inject IMessageService Message
+
+<PageHeader Title="健康检查" Subtitle="监控上游服务健康状态">
+    <PageHeaderExtra>
+        <Button OnClick="RefreshHealth">刷新</Button>
+    </PageHeaderExtra>
+</PageHeader>
+
+<Spin Spinning="@_loading">
+    @if (_healthStatuses.Any())
+    {
+        <Table TItem="ProxyHostHealth" DataSource="@_healthStatuses" RowKey="x => x.HostId">
+            <PropertyColumn Property="h => h.HostName" Title="主机" />
+            <PropertyColumn Property="h => h.Status" Title="状态">
+                <Tag Color="@GetStatusColor(context.Status)">
+                    @DisplayText.Health(context.Status)
+                </Tag>
+            </PropertyColumn>
+            <PropertyColumn Property="h => h.LatencyMs" Title="延迟">
+                @context.LatencyMs ms
+            </PropertyColumn>
+            <PropertyColumn Property="h => h.LastChecked" Title="最后检查">
+                @(context.LastChecked?.ToString("HH:mm:ss") ?? "从未")
+            </PropertyColumn>
+            <PropertyColumn Property="h => h.Detail" Title="详情">
+                @(context.Detail ?? "-")
+            </PropertyColumn>
+            <ActionColumn Title="操作">
+                <Button Size="@ButtonSize.Small" OnClick="() => ShowHistory(context)">历史</Button>
+            </ActionColumn>
+        </Table>
+    }
+    else
+    {
+        <Card>
+            <Empty Description="@("暂无健康检查数据")" />
+        </Card>
+    }
+</Spin>
+
+<Modal Title="健康检查历史"
+       Visible="@_historyVisible"
+       OnCancel="() => _historyVisible = false"
+       Width="800">
+    @if (_selectedHost != null)
+    {
+        <Table TItem="HealthCheckResult" DataSource="@_selectedHost.History.TakeLast(20).ToList()" Size="@TableSize.Small">
+            <PropertyColumn Property="r => r.CheckedAt" Title="时间">
+                @context.CheckedAt.ToString("HH:mm:ss")
+            </PropertyColumn>
+            <PropertyColumn Property="r => r.Status" Title="状态">
+                <Tag Color="@GetStatusColor(context.Status)">
+                    @DisplayText.Health(context.Status)
+                </Tag>
+            </PropertyColumn>
+            <PropertyColumn Property="r => r.StatusCode" Title="状态码">
+                @(context.StatusCode > 0 ? context.StatusCode.ToString() : "-")
+            </PropertyColumn>
+            <PropertyColumn Property="r => r.LatencyMs" Title="延迟">
+                @context.LatencyMs ms
+            </PropertyColumn>
+            <PropertyColumn Property="r => r.Error" Title="错误">
+                @(context.Error ?? "-")
+            </PropertyColumn>
+        </Table>
+    }
+</Modal>
+
+@code {
+    private List<ProxyHostHealth> _healthStatuses = new();
+    private bool _loading = true;
+    private bool _historyVisible;
+    private ProxyHostHealth? _selectedHost;
+
+    protected override void OnInitialized()
+    {
+        HealthCheckService.OnHealthCheckCompleted += OnHealthCheckCompleted;
+        LoadHealthStatus();
+    }
+
+    private void OnHealthCheckCompleted(string hostId, HealthCheckResult result)
+    {
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void LoadHealthStatus()
+    {
+        _loading = true;
+        _healthStatuses = HealthCheckService.GetAllHealthStatus();
+        _loading = false;
+    }
+
+    private void RefreshHealth()
+    {
+        LoadHealthStatus();
+    }
+
+    private void ShowHistory(ProxyHostHealth host)
+    {
+        _selectedHost = host;
+        _historyVisible = true;
+    }
+
+    private string GetStatusColor(HealthStatus status)
+    {
+        return status switch
+        {
+            HealthStatus.Healthy => "green",
+            HealthStatus.Unhealthy => "red",
+            HealthStatus.Starting => "blue",
+            HealthStatus.Error => "orange",
+            _ => "default"
+        };
+    }
+
+    public void Dispose()
+    {
+        HealthCheckService.OnHealthCheckCompleted -= OnHealthCheckCompleted;
+    }
+}

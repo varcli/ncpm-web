@@ -1,0 +1,153 @@
+@page "/"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Services
+@attribute [Authorize]
+@inject DockerService DockerService
+@inject Ncpm.Services.ConfigService ConfigService
+@inject NginxService NginxService
+
+<PageContainer Title="仪表盘">
+    <Row Gutter="16">
+        <Col Span="6">
+            <Card>
+                <Statistic Title="运行中容器" Value="@_runningContainers" />
+            </Card>
+        </Col>
+        <Col Span="6">
+            <Card>
+                <Statistic Title="容器总数" Value="@_totalContainers" />
+            </Card>
+        </Col>
+        <Col Span="6">
+            <Card>
+                <Statistic Title="代理主机" Value="@_proxyHosts" />
+            </Card>
+        </Col>
+        <Col Span="6">
+            <Card>
+                <Statistic Title="证书数量" Value="@_certificates" />
+            </Card>
+        </Col>
+    </Row>
+
+    <Row Gutter="16" Style="margin-top: 16px;">
+        <Col Span="12">
+            <Card Title="快捷操作">
+                <Space Direction="@SpaceDirection.Vertical">
+                    <SpaceItem>
+                        <Button Type="@ButtonType.Primary" OnClick="NavigateToContainers">管理容器</Button>
+                    </SpaceItem>
+                    <SpaceItem>
+                        <Button OnClick="NavigateToProxy">配置代理</Button>
+                    </SpaceItem>
+                    <SpaceItem>
+                        <Button OnClick="NavigateToCertificates">管理证书</Button>
+                    </SpaceItem>
+                </Space>
+            </Card>
+        </Col>
+        <Col Span="12">
+            <Card Title="系统状态">
+                <Descriptions Bordered Column="1">
+                    <DescriptionsItem Title="Docker 状态">
+                        @if (_dockerConnected)
+                        {
+                            <Tag Color="@("green")">已连接</Tag>
+                        }
+                        else
+                        {
+                            <Tag Color="@("red")">不可用</Tag>
+                        }
+                    </DescriptionsItem>
+                    <DescriptionsItem Title="Nginx 状态">
+                        @if (_nginxOk == true)
+                        {
+                            <Tag Color="@("green")">配置有效</Tag>
+                        }
+                        else if (_nginxOk == false)
+                        {
+                            <Tag Color="@("red")">配置异常</Tag>
+                        }
+                        else
+                        {
+                            <Tag Color="@("default")">检测中</Tag>
+                        }
+                    </DescriptionsItem>
+                    <DescriptionsItem Title="启用的代理主机">
+                        @_enabledProxyHosts / @_proxyHosts
+                    </DescriptionsItem>
+                    <DescriptionsItem Title="即将过期证书">
+                        @if (_expiringCertificates > 0)
+                        {
+                            <Tag Color="@("orange")">@_expiringCertificates 个 30 天内到期</Tag>
+                        }
+                        else
+                        {
+                            <Tag Color="@("green")">无</Tag>
+                        }
+                    </DescriptionsItem>
+                </Descriptions>
+
+                @if (_nginxOk == false && !string.IsNullOrEmpty(NginxService.LastError))
+                {
+                    <Alert Type="@AlertType.Error"
+                           ShowIcon="true"
+                           Message="Nginx 配置校验失败"
+                           Description="@NginxService.LastError"
+                           Style="margin-top: 12px;" />
+                }
+            </Card>
+        </Col>
+    </Row>
+</PageContainer>
+
+@code {
+    private int _runningContainers;
+    private int _totalContainers;
+    private int _proxyHosts;
+    private int _enabledProxyHosts;
+    private int _certificates;
+    private int _expiringCertificates;
+    private bool _dockerConnected;
+    private bool? _nginxOk;
+
+    [Inject] private NavigationManager Navigation { get; set; } = default!;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            var containers = await DockerService.ListContainersAsync();
+            _totalContainers = containers.Count;
+            _runningContainers = containers.Count(c => c.IsRunning);
+            _dockerConnected = true;
+        }
+        catch
+        {
+            // Docker may be unreachable; the status tag reports it.
+            _dockerConnected = false;
+        }
+
+        var hosts = ConfigService.LoadProxyHosts();
+        _proxyHosts = hosts.Count;
+        _enabledProxyHosts = hosts.Count(h => h.Enabled);
+
+        var certs = ConfigService.LoadCertificates();
+        _certificates = certs.Count;
+        _expiringCertificates = certs.Count(c => c.IsExpiringSoon || c.IsExpired);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+            return;
+
+        // Runs nginx -t, so keep it off the initial render path.
+        _nginxOk = await NginxService.ValidateConfigAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private void NavigateToContainers() => Navigation.NavigateTo("/docker/containers");
+    private void NavigateToProxy() => Navigation.NavigateTo("/proxy/hosts");
+    private void NavigateToCertificates() => Navigation.NavigateTo("/certificates");
+}

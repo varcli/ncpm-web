@@ -1,0 +1,6 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+  </Configurations>
+  <Project Path="src/Ncpm.Web/Ncpm.Web.csproj" />
+</Solution>
