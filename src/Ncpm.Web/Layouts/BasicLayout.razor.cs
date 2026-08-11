@@ -54,17 +54,38 @@ namespace Ncpm.Layouts
                 },
                 new MenuDataItem
                 {
-                    Name = "反向代理",
+                    Name = "站点管理",
                     Key = "proxy",
                     Icon = "global",
                     Children = new[]
                     {
                         new MenuDataItem
                         {
-                            Path = "/proxy/hosts",
-                            Name = "代理主机",
-                            Key = "proxy-hosts",
+                            Path = "/proxy/http",
+                            Name = "HTTP 代理",
+                            Key = "proxy-http",
                             Icon = "cloud-server",
+                        },
+                        new MenuDataItem
+                        {
+                            Path = "/proxy/tcp",
+                            Name = "TCP 代理",
+                            Key = "proxy-tcp",
+                            Icon = "api",
+                        },
+                        new MenuDataItem
+                        {
+                            Path = "/proxy/udp",
+                            Name = "UDP 代理",
+                            Key = "proxy-udp",
+                            Icon = "thunderbolt",
+                        },
+                        new MenuDataItem
+                        {
+                            Path = "/proxy/fileserver",
+                            Name = "静态文件",
+                            Key = "proxy-fileserver",
+                            Icon = "file",
                         }
                     }
                 },

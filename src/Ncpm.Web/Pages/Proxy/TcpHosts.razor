@@ -1,0 +1,200 @@
+@page "/proxy/tcp"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@inject Ncpm.Services.ConfigService ConfigService
+@inject NginxService NginxService
+@inject IMessageService Message
+
+<PageHeader Title="TCP 代理" Subtitle="管理 TCP 端口转发代理配置">
+    <PageHeaderExtra>
+        <Button Type="@ButtonType.Primary" Icon="@IconType.Outline.Plus" OnClick="OpenCreate">新建代理</Button>
+    </PageHeaderExtra>
+</PageHeader>
+
+<Table TItem="ProxyHostConfig" DataSource="@_hosts" Loading="@_loading">
+    <PropertyColumn Property="c => c.Id" Title="ID" Width="100" />
+    <PropertyColumn Property="c => c.Hosts" Title="域名">
+        @foreach (var host in context.Hosts)
+        {
+            <Tag>@host</Tag>
+        }
+    </PropertyColumn>
+    <PropertyColumn Property="c => c.Http.ListenPort" Title="监听端口" Width="100">
+        <Tag Color="@("orange")">@context.Http.ListenPort</Tag>
+    </PropertyColumn>
+    <PropertyColumn Property="c => c.Upstreams" Title="目标" Width="200">
+        @foreach (var upstream in context.Upstreams.Take(2))
+        {
+            <Tag>@upstream.Url</Tag>
+        }
+        @if (context.Upstreams.Count > 2)
+        {
+            <Tag>+@(context.Upstreams.Count - 2)</Tag>
+        }
+    </PropertyColumn>
+    <PropertyColumn Property="c => c.LoadBalance.Mode" Title="负载均衡" Width="100">
+        @if (context.Upstreams.Count > 1)
+        {
+            <Tag>@DisplayText.LoadBalanceMode(context.LoadBalance.Mode)</Tag>
+        }
+        else
+        {
+            <span style="color: #999;">-</span>
+        }
+    </PropertyColumn>
+    <PropertyColumn Property="c => c.Enabled" Title="状态" Width="80">
+        <Tag Color="@(context.Enabled ? "green" : "red")">@(context.Enabled ? "启用" : "禁用")</Tag>
+    </PropertyColumn>
+    <ActionColumn Title="操作" Width="200">
+        <Space>
+            <SpaceItem><Button Type="@ButtonType.Link" Icon="@IconType.Outline.Edit" OnClick="@(() => OpenEdit(context))">编辑</Button></SpaceItem>
+            <SpaceItem><Button Type="@ButtonType.Link" Icon="@IconType.Outline.Reload" OnClick="@(() => PublishHost(context))">发布</Button></SpaceItem>
+            <SpaceItem><Popconfirm Title="确认删除此代理配置？" OnConfirm="@(() => DeleteHost(context))" OkText="确认" CancelText="取消">
+                <Button Type="@ButtonType.Link" Danger Icon="@IconType.Outline.Delete">删除</Button>
+            </Popconfirm></SpaceItem>
+        </Space>
+    </ActionColumn>
+</Table>
+
+@* Create/Edit Modal *@
+<Modal Title="@(_isEditing ? "编辑 TCP 代理" : "新建 TCP 代理")" @bind-Visible="@_modalVisible" Width="900" OnOk="SaveHost" OnCancel="CloseModal">
+    <Form Model="@_editHost" Layout="@FormLayout.Vertical">
+        <Tabs DefaultActiveKey="basic">
+            <TabPane Key="basic" Tab="基础">
+                <FormItem Label="域名（每行一个）">
+                    <TextArea Rows="3" @bind-Value="@_hostsText" Placeholder="app.example.com&#10;*.example.com" />
+                </FormItem>
+                <FormItem Label="监听端口">
+                    <AntDesign.InputNumber @bind-Value="@_editHost.Http.ListenPort" Style="width: 100%" Placeholder="3306" />
+                </FormItem>
+                <FormItem Label="启用">
+                    <Switch @bind-Value="@_editHost.Enabled" />
+                </FormItem>
+            </TabPane>
+
+            <TabPane Key="upstream" Tab="目标">
+                @foreach (var upstream in _editHost.Upstreams)
+                {
+                    <Row Gutter="8" Style="margin-bottom: 8px;">
+                        <AntDesign.Col Span="12">
+                            <Input @bind-Value="@upstream.Url" Placeholder="192.168.1.100:3306" />
+                        </AntDesign.Col>
+                        <AntDesign.Col Span="4">
+                            <AntDesign.InputNumber @bind-Value="@upstream.Weight" Min="1" Placeholder="权重" />
+                        </AntDesign.Col>
+                        <AntDesign.Col Span="4">
+                            <Checkbox @bind-Value="@upstream.IsBackup">备用</Checkbox>
+                        </AntDesign.Col>
+                        <AntDesign.Col Span="4">
+                            <Button Danger OnClick="@(() => _editHost.Upstreams.Remove(upstream))">删除</Button>
+                        </AntDesign.Col>
+                    </Row>
+                }
+                <Button Type="@ButtonType.Dashed" OnClick="@(() => _editHost.Upstreams.Add(new UpstreamConfig()))" Style="width: 100%;">
+                    + 添加目标
+                </Button>
+
+                @if (_editHost.Upstreams.Count > 1)
+                {
+                    <Divider>负载均衡</Divider>
+                    <FormItem Label="均衡模式">
+                        <Select @bind-Value="@_editHost.LoadBalance.Mode" TItem="LoadBalanceMode" TItemValue="LoadBalanceMode">
+                            <SelectOptions>
+                                <SelectOption TItem="LoadBalanceMode" TItemValue="LoadBalanceMode" Value="@LoadBalanceMode.RoundRobin" Label="轮询 (Round Robin)" />
+                                <SelectOption TItem="LoadBalanceMode" TItemValue="LoadBalanceMode" Value="@LoadBalanceMode.LeastConn" Label="最少连接 (Least Conn)" />
+                                <SelectOption TItem="LoadBalanceMode" TItemValue="LoadBalanceMode" Value="@LoadBalanceMode.IpHash" Label="IP 哈希 (IP Hash)" />
+                            </SelectOptions>
+                        </Select>
+                    </FormItem>
+                }
+            </TabPane>
+        </Tabs>
+    </Form>
+</Modal>
+
+@code {
+    private List<ProxyHostConfig> _hosts = new();
+    private bool _loading = true;
+    private bool _modalVisible;
+    private bool _isEditing;
+    private ProxyHostConfig _editHost = new();
+    private string _hostsText = string.Empty;
+
+    protected override void OnInitialized()
+    {
+        LoadHosts();
+    }
+
+    private void LoadHosts()
+    {
+        _loading = true;
+        _hosts = ConfigService.LoadProxyHosts().Where(h => h.Scheme == ProxyScheme.Tcp).ToList();
+        _loading = false;
+    }
+
+    private void OpenCreate()
+    {
+        _isEditing = false;
+        _editHost = new ProxyHostConfig
+        {
+            Id = Guid.NewGuid().ToString("N")[..8],
+            Scheme = ProxyScheme.Tcp,
+            Tls = new TlsHostConfig(),
+            Http = new HttpHostConfig(),
+            LoadBalance = new LoadBalanceConfig(),
+            Logging = new LoggingHostConfig { AccessLog = true, ErrorLog = true }
+        };
+        _hostsText = string.Empty;
+        _modalVisible = true;
+    }
+
+    private void OpenEdit(ProxyHostConfig host)
+    {
+        _isEditing = true;
+        _editHost = host;
+        _hostsText = string.Join("\n", host.Hosts);
+        _modalVisible = true;
+    }
+
+    private void CloseModal()
+    {
+        _modalVisible = false;
+    }
+
+    private void SaveHost()
+    {
+        _editHost.Hosts = _hostsText.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+        _editHost.UpdatedAt = DateTime.UtcNow;
+
+        ConfigService.SaveProxyHost(_editHost);
+
+        if (!_isEditing)
+            _hosts.Add(_editHost);
+
+        _modalVisible = false;
+        Message.Success(_isEditing ? "代理配置已更新" : "代理配置已创建");
+    }
+
+    private async Task PublishHost(ProxyHostConfig host)
+    {
+        try
+        {
+            var success = await NginxService.PublishConfigAsync(host);
+            Message.Success(success ? "Nginx 配置已发布并重载" : "发布失败");
+        }
+        catch (Exception ex)
+        {
+            Message.Error($"发布失败: {ex.Message}");
+        }
+    }
+
+    private void DeleteHost(ProxyHostConfig host)
+    {
+        ConfigService.DeleteProxyHost(host.Id);
+        NginxService.DeleteConfig(host.Id);
+        _hosts.Remove(host);
+        Message.Success("代理配置已删除");
+    }
+}

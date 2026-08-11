@@ -1,4 +1,4 @@
-@page "/proxy/hosts"
+@page "/proxy/http"
 @using Microsoft.AspNetCore.Authorization
 @using Ncpm.Data
 @using Ncpm.Services
@@ -7,7 +7,7 @@
 @inject NginxService NginxService
 @inject IMessageService Message
 
-<PageHeader Title="反向代理" Subtitle="管理代理主机配置">
+<PageHeader Title="HTTP 代理" Subtitle="管理 HTTP/HTTPS 反向代理配置">
     <PageHeaderExtra>
         <Button Type="@ButtonType.Primary" Icon="@IconType.Outline.Plus" OnClick="OpenCreate">新建代理</Button>
     </PageHeaderExtra>
@@ -15,11 +15,6 @@
 
 <Table TItem="ProxyHostConfig" DataSource="@_hosts" Loading="@_loading">
     <PropertyColumn Property="c => c.Id" Title="ID" Width="100" />
-    <PropertyColumn Property="c => c.Scheme" Title="类型" Width="80">
-        <Tag Color="@(context.Scheme == ProxyScheme.Http ? "blue" : context.Scheme == ProxyScheme.Tcp ? "orange" : context.Scheme == ProxyScheme.Udp ? "purple" : "green")">
-            @DisplayText.ProxyScheme(context.Scheme)
-        </Tag>
-    </PropertyColumn>
     <PropertyColumn Property="c => c.Hosts" Title="域名">
         @foreach (var host in context.Hosts)
         {
@@ -66,92 +61,57 @@
 </Table>
 
 @* Create/Edit Modal *@
-<Modal Title="@(_isEditing ? "编辑代理" : "新建代理")" @bind-Visible="@_modalVisible" Width="900" OnOk="SaveHost" OnCancel="CloseModal">
+<Modal Title="@(_isEditing ? "编辑 HTTP 代理" : "新建 HTTP 代理")" @bind-Visible="@_modalVisible" Width="900" OnOk="SaveHost" OnCancel="CloseModal">
     <Form Model="@_editHost" Layout="@FormLayout.Vertical">
         <Tabs DefaultActiveKey="basic">
             <TabPane Key="basic" Tab="基础">
-                <FormItem Label="类型">
-                    <Select @bind-Value="@_editHost.Scheme" TItem="ProxyScheme" TItemValue="ProxyScheme">
-                        <SelectOptions>
-                            <SelectOption TItem="ProxyScheme" TItemValue="ProxyScheme" Value="@ProxyScheme.Http" Label="HTTP 反向代理" />
-                            <SelectOption TItem="ProxyScheme" TItemValue="ProxyScheme" Value="@ProxyScheme.Tcp" Label="TCP 代理" />
-                            <SelectOption TItem="ProxyScheme" TItemValue="ProxyScheme" Value="@ProxyScheme.Udp" Label="UDP 代理" />
-                            <SelectOption TItem="ProxyScheme" TItemValue="ProxyScheme" Value="@ProxyScheme.FileServer" Label="静态文件服务" />
-                        </SelectOptions>
-                    </Select>
-                </FormItem>
                 <FormItem Label="域名（每行一个）">
                     <TextArea Rows="3" @bind-Value="@_hostsText" Placeholder="app.example.com&#10;*.example.com" />
                 </FormItem>
-                @if (_editHost.Scheme == ProxyScheme.Tcp || _editHost.Scheme == ProxyScheme.Udp)
-                {
-                    <FormItem Label="监听端口">
-                        <AntDesign.InputNumber @bind-Value="@_editHost.Http.ListenPort" Style="width: 100%" />
-                    </FormItem>
-                }
                 <FormItem Label="启用">
                     <Switch @bind-Value="@_editHost.Enabled" />
                 </FormItem>
             </TabPane>
 
-            @if (_editHost.Scheme == ProxyScheme.Http || _editHost.Scheme == ProxyScheme.Https)
-            {
-                <TabPane Key="upstream" Tab="目标">
-                    @foreach (var upstream in _editHost.Upstreams)
-                    {
-                        <Row Gutter="8" Style="margin-bottom: 8px;">
-                            <AntDesign.Col Span="12">
-                                <Input @bind-Value="@upstream.Url" Placeholder="http://localhost:3000" />
-                            </AntDesign.Col>
-                            <AntDesign.Col Span="4">
-                                <AntDesign.InputNumber @bind-Value="@upstream.Weight" Min="1" Placeholder="权重" />
-                            </AntDesign.Col>
-                            <AntDesign.Col Span="4">
-                                <Checkbox @bind-Value="@upstream.IsBackup">备用</Checkbox>
-                            </AntDesign.Col>
-                            <AntDesign.Col Span="4">
-                                <Button Danger OnClick="@(() => _editHost.Upstreams.Remove(upstream))">删除</Button>
-                            </AntDesign.Col>
-                        </Row>
-                    }
-                    <Button Type="@ButtonType.Dashed" OnClick="@(() => _editHost.Upstreams.Add(new UpstreamConfig()))" Style="width: 100%;">
-                        + 添加目标
-                    </Button>
+            <TabPane Key="upstream" Tab="目标">
+                @foreach (var upstream in _editHost.Upstreams)
+                {
+                    <Row Gutter="8" Style="margin-bottom: 8px;">
+                        <AntDesign.Col Span="12">
+                            <Input @bind-Value="@upstream.Url" Placeholder="http://localhost:3000" />
+                        </AntDesign.Col>
+                        <AntDesign.Col Span="4">
+                            <AntDesign.InputNumber @bind-Value="@upstream.Weight" Min="1" Placeholder="权重" />
+                        </AntDesign.Col>
+                        <AntDesign.Col Span="4">
+                            <Checkbox @bind-Value="@upstream.IsBackup">备用</Checkbox>
+                        </AntDesign.Col>
+                        <AntDesign.Col Span="4">
+                            <Button Danger OnClick="@(() => _editHost.Upstreams.Remove(upstream))">删除</Button>
+                        </AntDesign.Col>
+                    </Row>
+                }
+                <Button Type="@ButtonType.Dashed" OnClick="@(() => _editHost.Upstreams.Add(new UpstreamConfig()))" Style="width: 100%;">
+                    + 添加目标
+                </Button>
 
-                    @if (_editHost.Upstreams.Count > 1)
-                    {
-                        <Divider>负载均衡</Divider>
-                        <FormItem Label="均衡模式">
-                            <Select @bind-Value="@_editHost.LoadBalance.Mode" TItem="LoadBalanceMode" TItemValue="LoadBalanceMode">
-                                <SelectOptions>
-                                    <SelectOption TItem="LoadBalanceMode" TItemValue="LoadBalanceMode" Value="@LoadBalanceMode.RoundRobin" Label="轮询 (Round Robin)" />
-                                    <SelectOption TItem="LoadBalanceMode" TItemValue="LoadBalanceMode" Value="@LoadBalanceMode.LeastConn" Label="最少连接 (Least Conn)" />
-                                    <SelectOption TItem="LoadBalanceMode" TItemValue="LoadBalanceMode" Value="@LoadBalanceMode.IpHash" Label="IP 哈希 (IP Hash)" />
-                                </SelectOptions>
-                            </Select>
-                        </FormItem>
-                        <FormItem Label="会话保持">
-                            <Switch @bind-Value="@_editHost.LoadBalance.Sticky" />
-                        </FormItem>
-                    }
-                </TabPane>
-            }
-
-            @if (_editHost.Scheme == ProxyScheme.FileServer)
-            {
-                <TabPane Key="fileserver" Tab="文件服务">
-                    <FormItem Label="根目录">
-                        <Input @bind-Value="@_editHost.Http.Root" Placeholder="/var/www/html" />
+                @if (_editHost.Upstreams.Count > 1)
+                {
+                    <Divider>负载均衡</Divider>
+                    <FormItem Label="均衡模式">
+                        <Select @bind-Value="@_editHost.LoadBalance.Mode" TItem="LoadBalanceMode" TItemValue="LoadBalanceMode">
+                            <SelectOptions>
+                                <SelectOption TItem="LoadBalanceMode" TItemValue="LoadBalanceMode" Value="@LoadBalanceMode.RoundRobin" Label="轮询 (Round Robin)" />
+                                <SelectOption TItem="LoadBalanceMode" TItemValue="LoadBalanceMode" Value="@LoadBalanceMode.LeastConn" Label="最少连接 (Least Conn)" />
+                                <SelectOption TItem="LoadBalanceMode" TItemValue="LoadBalanceMode" Value="@LoadBalanceMode.IpHash" Label="IP 哈希 (IP Hash)" />
+                            </SelectOptions>
+                        </Select>
                     </FormItem>
-                    <FormItem Label="SPA 模式">
-                        <Switch @bind-Value="@_editHost.Http.Spa" />
-                        <div style="color: #999; font-size: 12px;">启用后所有请求都会回退到 index.html</div>
+                    <FormItem Label="会话保持">
+                        <Switch @bind-Value="@_editHost.LoadBalance.Sticky" />
                     </FormItem>
-                    <FormItem Label="默认文件">
-                        <Input @bind-Value="@_editHost.Http.Index" Placeholder="index.html" />
-                    </FormItem>
-                </TabPane>
-            }
+                }
+            </TabPane>
 
             <TabPane Key="tls" Tab="TLS">
                 <FormItem Label="TLS 模式">
@@ -337,7 +297,7 @@
     private void LoadHosts()
     {
         _loading = true;
-        _hosts = ConfigService.LoadProxyHosts();
+        _hosts = ConfigService.LoadProxyHosts().Where(h => h.Scheme == ProxyScheme.Http || h.Scheme == ProxyScheme.Https).ToList();
         _loading = false;
     }
 
@@ -347,6 +307,7 @@
         _editHost = new ProxyHostConfig
         {
             Id = Guid.NewGuid().ToString("N")[..8],
+            Scheme = ProxyScheme.Http,
             Tls = new TlsHostConfig(),
             Http = new HttpHostConfig(),
             LoadBalance = new LoadBalanceConfig(),

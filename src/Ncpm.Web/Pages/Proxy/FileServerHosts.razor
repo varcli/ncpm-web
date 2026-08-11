@@ -1,0 +1,185 @@
+@page "/proxy/fileserver"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@inject Ncpm.Services.ConfigService ConfigService
+@inject NginxService NginxService
+@inject IMessageService Message
+
+<PageHeader Title="静态文件" Subtitle="管理静态文件服务配置">
+    <PageHeaderExtra>
+        <Button Type="@ButtonType.Primary" Icon="@IconType.Outline.Plus" OnClick="OpenCreate">新建服务</Button>
+    </PageHeaderExtra>
+</PageHeader>
+
+<Table TItem="ProxyHostConfig" DataSource="@_hosts" Loading="@_loading">
+    <PropertyColumn Property="c => c.Id" Title="ID" Width="100" />
+    <PropertyColumn Property="c => c.Hosts" Title="域名">
+        @foreach (var host in context.Hosts)
+        {
+            <Tag>@host</Tag>
+        }
+    </PropertyColumn>
+    <PropertyColumn Property="c => c.Http.Root" Title="根目录" Width="200">
+        <Tag Color="@("green")">@context.Http.Root</Tag>
+    </PropertyColumn>
+    <PropertyColumn Property="c => c.Tls.Mode" Title="TLS" Width="110">
+        <Tag Color="@(context.Tls.Mode == TlsMode.Acme ? "green" : context.Tls.Mode == TlsMode.Manual ? "blue" : "default")">
+            @DisplayText.TlsMode(context.Tls.Mode)
+        </Tag>
+    </PropertyColumn>
+    <PropertyColumn Property="c => c.Enabled" Title="状态" Width="80">
+        <Tag Color="@(context.Enabled ? "green" : "red")">@(context.Enabled ? "启用" : "禁用")</Tag>
+    </PropertyColumn>
+    <ActionColumn Title="操作" Width="200">
+        <Space>
+            <SpaceItem><Button Type="@ButtonType.Link" Icon="@IconType.Outline.Edit" OnClick="@(() => OpenEdit(context))">编辑</Button></SpaceItem>
+            <SpaceItem><Button Type="@ButtonType.Link" Icon="@IconType.Outline.Reload" OnClick="@(() => PublishHost(context))">发布</Button></SpaceItem>
+            <SpaceItem><Popconfirm Title="确认删除此服务配置？" OnConfirm="@(() => DeleteHost(context))" OkText="确认" CancelText="取消">
+                <Button Type="@ButtonType.Link" Danger Icon="@IconType.Outline.Delete">删除</Button>
+            </Popconfirm></SpaceItem>
+        </Space>
+    </ActionColumn>
+</Table>
+
+@* Create/Edit Modal *@
+<Modal Title="@(_isEditing ? "编辑静态文件服务" : "新建静态文件服务")" @bind-Visible="@_modalVisible" Width="900" OnOk="SaveHost" OnCancel="CloseModal">
+    <Form Model="@_editHost" Layout="@FormLayout.Vertical">
+        <Tabs DefaultActiveKey="basic">
+            <TabPane Key="basic" Tab="基础">
+                <FormItem Label="域名（每行一个）">
+                    <TextArea Rows="3" @bind-Value="@_hostsText" Placeholder="static.example.com&#10;cdn.example.com" />
+                </FormItem>
+                <FormItem Label="启用">
+                    <Switch @bind-Value="@_editHost.Enabled" />
+                </FormItem>
+            </TabPane>
+
+            <TabPane Key="fileserver" Tab="文件服务">
+                <FormItem Label="根目录">
+                    <Input @bind-Value="@_editHost.Http.Root" Placeholder="/var/www/html" />
+                </FormItem>
+                <FormItem Label="SPA 模式">
+                    <Switch @bind-Value="@_editHost.Http.Spa" />
+                    <div style="color: #999; font-size: 12px;">启用后所有请求都会回退到 index.html</div>
+                </FormItem>
+                <FormItem Label="默认文件">
+                    <Input @bind-Value="@_editHost.Http.Index" Placeholder="index.html" />
+                </FormItem>
+            </TabPane>
+
+            <TabPane Key="tls" Tab="TLS">
+                <FormItem Label="TLS 模式">
+                    <Select @bind-Value="@_editHost.Tls.Mode" TItem="TlsMode" TItemValue="TlsMode">
+                        <SelectOptions>
+                            <SelectOption TItem="TlsMode" TItemValue="TlsMode" Value="@TlsMode.Off" Label="关闭" />
+                            <SelectOption TItem="TlsMode" TItemValue="TlsMode" Value="@TlsMode.Manual" Label="手动证书" />
+                            <SelectOption TItem="TlsMode" TItemValue="TlsMode" Value="@TlsMode.Acme" Label="ACME 自动证书" />
+                        </SelectOptions>
+                    </Select>
+                </FormItem>
+                @if (_editHost.Tls.Mode == TlsMode.Manual)
+                {
+                    <FormItem Label="证书路径">
+                        <Input @bind-Value="@_editHost.Tls.CertPath" />
+                    </FormItem>
+                    <FormItem Label="密钥路径">
+                        <Input @bind-Value="@_editHost.Tls.KeyPath" />
+                    </FormItem>
+                }
+                @if (_editHost.Tls.Mode != TlsMode.Off)
+                {
+                    <FormItem Label="强制 HTTPS">
+                        <Switch @bind-Value="@_editHost.Http.RedirectToHttps" />
+                    </FormItem>
+                }
+            </TabPane>
+        </Tabs>
+    </Form>
+</Modal>
+
+@code {
+    private List<ProxyHostConfig> _hosts = new();
+    private bool _loading = true;
+    private bool _modalVisible;
+    private bool _isEditing;
+    private ProxyHostConfig _editHost = new();
+    private string _hostsText = string.Empty;
+
+    protected override void OnInitialized()
+    {
+        LoadHosts();
+    }
+
+    private void LoadHosts()
+    {
+        _loading = true;
+        _hosts = ConfigService.LoadProxyHosts().Where(h => h.Scheme == ProxyScheme.FileServer).ToList();
+        _loading = false;
+    }
+
+    private void OpenCreate()
+    {
+        _isEditing = false;
+        _editHost = new ProxyHostConfig
+        {
+            Id = Guid.NewGuid().ToString("N")[..8],
+            Scheme = ProxyScheme.FileServer,
+            Tls = new TlsHostConfig(),
+            Http = new HttpHostConfig { Index = "index.html" },
+            LoadBalance = new LoadBalanceConfig(),
+            Logging = new LoggingHostConfig { AccessLog = true, ErrorLog = true }
+        };
+        _hostsText = string.Empty;
+        _modalVisible = true;
+    }
+
+    private void OpenEdit(ProxyHostConfig host)
+    {
+        _isEditing = true;
+        _editHost = host;
+        _hostsText = string.Join("\n", host.Hosts);
+        _modalVisible = true;
+    }
+
+    private void CloseModal()
+    {
+        _modalVisible = false;
+    }
+
+    private void SaveHost()
+    {
+        _editHost.Hosts = _hostsText.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+        _editHost.UpdatedAt = DateTime.UtcNow;
+
+        ConfigService.SaveProxyHost(_editHost);
+
+        if (!_isEditing)
+            _hosts.Add(_editHost);
+
+        _modalVisible = false;
+        Message.Success(_isEditing ? "服务配置已更新" : "服务配置已创建");
+    }
+
+    private async Task PublishHost(ProxyHostConfig host)
+    {
+        try
+        {
+            var success = await NginxService.PublishConfigAsync(host);
+            Message.Success(success ? "Nginx 配置已发布并重载" : "发布失败");
+        }
+        catch (Exception ex)
+        {
+            Message.Error($"发布失败: {ex.Message}");
+        }
+    }
+
+    private void DeleteHost(ProxyHostConfig host)
+    {
+        ConfigService.DeleteProxyHost(host.Id);
+        NginxService.DeleteConfig(host.Id);
+        _hosts.Remove(host);
+        Message.Success("服务配置已删除");
+    }
+}
