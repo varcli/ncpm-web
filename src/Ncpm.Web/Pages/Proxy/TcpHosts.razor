@@ -190,11 +190,16 @@
         }
     }
 
-    private void DeleteHost(ProxyHostConfig host)
+    private async Task DeleteHost(ProxyHostConfig host)
     {
+        if (!await NginxService.DeleteConfigAsync(host.Id))
+        {
+            Message.Error($"停用 Nginx 配置失败: {NginxService.LastError}");
+            return;
+        }
+
         ConfigService.DeleteProxyHost(host.Id);
-        NginxService.DeleteConfig(host.Id);
         _hosts.Remove(host);
-        Message.Success("代理配置已删除");
+        Message.Success("代理配置已删除并重载 Nginx");
     }
 }

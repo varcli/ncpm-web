@@ -35,6 +35,25 @@
     </Col>
 </Row>
 
+<Card Title="容器实时资源" Style="margin-top: 16px;">
+    <Table TItem="ContainerMetrics" DataSource="@_containerMetrics" RowKey="x => x.ContainerId"
+           Pagination="false" Size="@TableSize.Small">
+        <PropertyColumn Property="x => x.Name" Title="容器" />
+        <PropertyColumn Property="x => x.HostName" Title="Docker 主机" />
+        <PropertyColumn Property="x => x.CpuUsage" Title="CPU">
+            @($"{context.CpuUsage:F2}%")
+        </PropertyColumn>
+        <PropertyColumn Property="x => x.MemoryUsage" Title="内存">
+            @($"{FormatBytes(context.MemoryUsage)} / {FormatBytes(context.MemoryLimit)} ({context.MemoryPercent:F1}%)")
+        </PropertyColumn>
+        <PropertyColumn Property="x => x.CollectedAt" Title="采集时间" Format="HH:mm:ss" Width="100" />
+    </Table>
+    @if (!_containerMetrics.Any())
+    {
+        <Empty Description="@("暂无运行中容器指标；首次 CPU 采样可能需要等待一个刷新周期")" />
+    }
+</Card>
+
 <Row Gutter="16" Style="margin-top: 16px;">
     <Col Span="12">
         <Card Title="系统状态">
@@ -87,6 +106,7 @@
     [Inject] private NavigationManager Navigation { get; set; } = default!;
     
     private SystemMetrics _metrics = new();
+    private List<ContainerMetrics> _containerMetrics = new();
     private Timer? _refreshTimer;
 
     protected override void OnInitialized()
@@ -102,6 +122,7 @@
     private void RefreshMetrics()
     {
         _metrics = MonitorService.GetCurrentMetrics();
+        _containerMetrics = MonitorService.GetContainerMetrics();
     }
 
     private string FormatBytes(long bytes)

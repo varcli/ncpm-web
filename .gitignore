@@ -45,6 +45,7 @@ desktop.ini
 coverage/
 *.coverage
 *.trx
+.tmp/
 
 # ---------------------------------------------------------------------------
 # Runtime state — never commit. The panel writes its own config on first run

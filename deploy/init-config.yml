@@ -3,6 +3,9 @@ panel:
   host: "0.0.0.0"
   port: 8098
   basePath: "/"
+  # Forwarded headers are ignored unless the immediate proxy is listed here.
+  trustedProxies: []
+  forwardedHeaderLimit: 1
 docker:
   host: "unix:///var/run/docker.sock"
   apiTimeout: 30

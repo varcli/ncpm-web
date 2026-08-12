@@ -22,6 +22,7 @@ public class HealthCheckService : IDisposable
 
     private readonly HttpClient _httpClient;
     private Timer? _checkTimer;
+    private int _checking;
     private bool _disposed;
 
     // Set whenever configuration changes; the next sweep rebuilds the probe set.
@@ -173,6 +174,9 @@ public class HealthCheckService : IDisposable
 
     private async void PerformHealthChecks(object? state)
     {
+        if (Interlocked.CompareExchange(ref _checking, 1, 0) != 0)
+            return;
+
         // async void on a timer callback: an escaping exception would crash the
         // process, so everything is contained here.
         try
@@ -201,6 +205,10 @@ public class HealthCheckService : IDisposable
         catch (Exception ex)
         {
             _logger.LogError(ex, "Health check sweep failed");
+        }
+        finally
+        {
+            Volatile.Write(ref _checking, 0);
         }
     }
 

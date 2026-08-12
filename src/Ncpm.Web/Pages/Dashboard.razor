@@ -1,131 +1,276 @@
 @page "/"
 @using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
 @using Ncpm.Services
 @attribute [Authorize]
+@implements IDisposable
 @inject DockerService DockerService
 @inject Ncpm.Services.ConfigService ConfigService
 @inject NginxService NginxService
+@inject HealthCheckService HealthCheckService
+@inject MonitorService MonitorService
+@inject Ncpm.Services.NotificationService NotificationService
+@inject NavigationManager Navigation
 
-<PageContainer Title="仪表盘">
-    <Row Gutter="16">
-        <Col Span="6">
-            <Card>
-                <Statistic Title="运行中容器" Value="@_runningContainers" />
-            </Card>
-        </Col>
-        <Col Span="6">
-            <Card>
-                <Statistic Title="容器总数" Value="@_totalContainers" />
-            </Card>
-        </Col>
-        <Col Span="6">
-            <Card>
-                <Statistic Title="代理主机" Value="@_proxyHosts" />
-            </Card>
-        </Col>
-        <Col Span="6">
-            <Card>
-                <Statistic Title="证书数量" Value="@_certificates" />
-            </Card>
-        </Col>
-    </Row>
+<PageContainer Title="运行总览">
+    <div class="ops-dashboard">
+        <section class="ops-command-deck">
+            <div class="ops-command-copy">
+                <span class="ops-eyebrow">NCPM / LIVE CONTROL</span>
+                <h1>@Greeting，基础设施状态@OverallStatusText</h1>
+                <p>代理、容器与证书集中在一个视野。优先处理异常，其余保持安静。</p>
+            </div>
+            <div class="ops-command-actions">
+                <span class="ops-updated">更新于 @(_lastUpdated?.ToString("HH:mm:ss") ?? "--:--:--")</span>
+                <button class="ops-refresh" @onclick="RefreshAsync" disabled="@_loading">
+                    <Icon Type="reload" Spin="@_loading" />
+                    <span>@(_loading ? "正在检查" : "立即检查")</span>
+                </button>
+            </div>
 
-    <Row Gutter="16" Style="margin-top: 16px;">
-        <Col Span="12">
-            <Card Title="快捷操作">
-                <Space Direction="@SpaceDirection.Vertical">
-                    <SpaceItem>
-                        <Button Type="@ButtonType.Primary" OnClick="NavigateToContainers">管理容器</Button>
-                    </SpaceItem>
-                    <SpaceItem>
-                        <Button OnClick="NavigateToProxy">配置代理</Button>
-                    </SpaceItem>
-                    <SpaceItem>
-                        <Button OnClick="NavigateToCertificates">管理证书</Button>
-                    </SpaceItem>
-                </Space>
-            </Card>
-        </Col>
-        <Col Span="12">
-            <Card Title="系统状态">
-                <Descriptions Bordered Column="1">
-                    <DescriptionsItem Title="Docker 状态">
-                        @if (_dockerConnected)
-                        {
-                            <Tag Color="@("green")">已连接</Tag>
-                        }
-                        else
-                        {
-                            <Tag Color="@("red")">不可用</Tag>
-                        }
-                    </DescriptionsItem>
-                    <DescriptionsItem Title="Nginx 状态">
-                        @if (_nginxOk == true)
-                        {
-                            <Tag Color="@("green")">配置有效</Tag>
-                        }
-                        else if (_nginxOk == false)
-                        {
-                            <Tag Color="@("red")">配置异常</Tag>
-                        }
-                        else
-                        {
-                            <Tag Color="@("default")">检测中</Tag>
-                        }
-                    </DescriptionsItem>
-                    <DescriptionsItem Title="启用的代理主机">
-                        @_enabledProxyHosts / @_proxyHosts
-                    </DescriptionsItem>
-                    <DescriptionsItem Title="即将过期证书">
-                        @if (_expiringCertificates > 0)
-                        {
-                            <Tag Color="@("orange")">@_expiringCertificates 个 30 天内到期</Tag>
-                        }
-                        else
-                        {
-                            <Tag Color="@("green")">无</Tag>
-                        }
-                    </DescriptionsItem>
-                </Descriptions>
+            <div class="ops-signal-rail" aria-label="核心服务状态">
+                <button class="ops-signal" @onclick='() => Navigation.NavigateTo("/docker/containers")'>
+                    <span class="ops-signal-dot @DockerTone"></span>
+                    <span class="ops-signal-name">Docker</span>
+                    <strong>@DockerStatusText</strong>
+                    <small>@(_dockerError ?? $"{_runningContainers} 个容器运行中")</small>
+                </button>
+                <button class="ops-signal" @onclick='() => Navigation.NavigateTo("/proxy/http")'>
+                    <span class="ops-signal-dot @NginxTone"></span>
+                    <span class="ops-signal-name">Nginx</span>
+                    <strong>@NginxStatusText</strong>
+                    <small>@(_nginxError ?? $"{_enabledProxyHosts} 条代理已启用")</small>
+                </button>
+                <button class="ops-signal" @onclick='() => Navigation.NavigateTo("/monitoring/health")'>
+                    <span class="ops-signal-dot @HealthTone"></span>
+                    <span class="ops-signal-name">上游健康</span>
+                    <strong>@HealthStatusText</strong>
+                    <small>@(_healthStatuses.Count == 0 ? "等待首次探测" : $"{_healthyHosts}/{_healthStatuses.Count} 健康")</small>
+                </button>
+                <button class="ops-signal" @onclick='() => Navigation.NavigateTo("/certificates")'>
+                    <span class="ops-signal-dot @CertificateTone"></span>
+                    <span class="ops-signal-name">TLS 证书</span>
+                    <strong>@CertificateStatusText</strong>
+                    <small>@(_certificates == 0 ? "尚未添加证书" : $"共 {_certificates} 张证书")</small>
+                </button>
+            </div>
+        </section>
 
-                @if (_nginxOk == false && !string.IsNullOrEmpty(NginxService.LastError))
+        @if (!string.IsNullOrEmpty(_nginxError))
+        {
+            <div class="ops-alert" role="alert">
+                <Icon Type="warning" />
+                <div>
+                    <strong>Nginx 配置检查未通过</strong>
+                    <span>@_nginxError</span>
+                </div>
+                <button @onclick='() => Navigation.NavigateTo("/nginx/editor")'>检查配置</button>
+            </div>
+        }
+
+        <section class="ops-metrics" aria-label="资源摘要">
+            <article class="ops-metric">
+                <span>容器运行率</span>
+                <strong>@ContainerRate<small>%</small></strong>
+                <div class="ops-meter"><i style="width: @(ContainerRate)%"></i></div>
+                <p>@_runningContainers 运行 · @(_totalContainers - _runningContainers) 停止</p>
+            </article>
+            <article class="ops-metric">
+                <span>代理覆盖</span>
+                <strong>@_enabledProxyHosts<small>/ @_proxyHosts</small></strong>
+                <div class="ops-meter"><i style="width: @(ProxyRate)%"></i></div>
+                <p>@(_proxyHosts == 0 ? "创建第一条 HTTP 代理" : $"{_proxyHosts - _enabledProxyHosts} 条当前停用")</p>
+            </article>
+            <article class="ops-metric">
+                <span>健康检查</span>
+                <strong>@_healthyHosts<small>/ @_healthStatuses.Count</small></strong>
+                <div class="ops-meter @(_unhealthyHosts > 0 ? "danger" : null)"><i style="width: @(HealthRate)%"></i></div>
+                <p>@(_unhealthyHosts > 0 ? $"{_unhealthyHosts} 个上游需要处理" : "未发现上游故障")</p>
+            </article>
+            <article class="ops-metric">
+                <span>面板内存</span>
+                <strong>@FormatBytes(_panelMemory)</strong>
+                <div class="ops-memory-mark">WORKING SET</div>
+                <p>监控采样每 5 秒刷新</p>
+            </article>
+        </section>
+
+        <div class="ops-workspace">
+            <section class="ops-panel ops-health-panel">
+                <header class="ops-panel-header">
+                    <div>
+                        <span class="ops-section-kicker">ROUTE PULSE</span>
+                        <h2>上游健康</h2>
+                    </div>
+                    <button class="ops-text-action" @onclick='() => Navigation.NavigateTo("/monitoring/health")'>查看全部 <Icon Type="arrow-right" /></button>
+                </header>
+
+                @if (_healthStatuses.Count == 0)
                 {
-                    <Alert Type="@AlertType.Error"
-                           ShowIcon="true"
-                           Message="Nginx 配置校验失败"
-                           Description="@NginxService.LastError"
-                           Style="margin-top: 12px;" />
+                    <div class="ops-empty">
+                        <Icon Type="radar-chart" />
+                        <strong>还没有健康检查数据</strong>
+                        <p>为 HTTP 代理配置上游后，探测结果会在这里出现。</p>
+                        <button @onclick='() => Navigation.NavigateTo("/proxy/http")'>配置 HTTP 代理</button>
+                    </div>
                 }
-            </Card>
-        </Col>
-    </Row>
+                else
+                {
+                    <div class="ops-route-grid">
+                        @foreach (var host in OrderedHealthStatuses.Take(8))
+                        {
+                            <button class="ops-route @HealthClass(host.Status)" @onclick='() => Navigation.NavigateTo("/monitoring/health")' @key="host.HostId">
+                                <span class="ops-route-pulse"></span>
+                                <span class="ops-route-copy">
+                                    <strong>@(host.HostName ?? host.HostId)</strong>
+                                    <small>@(host.Detail ?? $"HTTP 响应 · {host.LatencyMs} ms")</small>
+                                </span>
+                                <span class="ops-route-latency">@host.LatencyMs<small>ms</small></span>
+                            </button>
+                        }
+                    </div>
+                }
+            </section>
+
+            <aside class="ops-panel ops-activity-panel">
+                <header class="ops-panel-header">
+                    <div>
+                        <span class="ops-section-kicker">LIVE ACTIVITY</span>
+                        <h2>最近信号</h2>
+                    </div>
+                    <span class="ops-live"><i></i> LIVE</span>
+                </header>
+
+                @if (_recentMessages.Count == 0)
+                {
+                    <div class="ops-empty ops-empty-compact">
+                        <Icon Type="bell" />
+                        <strong>目前很安静</strong>
+                        <p>代理健康状态发生变化时，会在这里留下记录。</p>
+                    </div>
+                }
+                else
+                {
+                    <div class="ops-timeline">
+                        @foreach (var item in _recentMessages.Take(6))
+                        {
+                            <article class="ops-event @EventClass(item.Level)" @key="item.Timestamp">
+                                <i></i>
+                                <div>
+                                    <span>@FormatAge(item.Timestamp)</span>
+                                    <strong>@item.Title</strong>
+                                    <p>@item.Body</p>
+                                </div>
+                            </article>
+                        }
+                    </div>
+                }
+            </aside>
+        </div>
+
+        <section class="ops-shortcuts">
+            <header class="ops-panel-header">
+                <div>
+                    <span class="ops-section-kicker">QUICK LAUNCH</span>
+                    <h2>开始操作</h2>
+                </div>
+            </header>
+            <div class="ops-shortcut-grid">
+                <button @onclick='() => Navigation.NavigateTo("/docker/containers")'><Icon Type="container" /><span><strong>管理容器</strong><small>启动、停止、日志与指标</small></span><Icon Type="arrow-right" /></button>
+                <button @onclick='() => Navigation.NavigateTo("/proxy/http")'><Icon Type="global" /><span><strong>发布代理</strong><small>域名、上游、TLS 与规则</small></span><Icon Type="arrow-right" /></button>
+                <button @onclick='() => Navigation.NavigateTo("/compose")'><Icon Type="appstore" /><span><strong>部署 Compose</strong><small>管理应用栈与编排文件</small></span><Icon Type="arrow-right" /></button>
+                <button @onclick='() => Navigation.NavigateTo("/certificates")'><Icon Type="safety-certificate" /><span><strong>检查证书</strong><small>导入、签发与到期状态</small></span><Icon Type="arrow-right" /></button>
+            </div>
+        </section>
+    </div>
 </PageContainer>
 
 @code {
+    private readonly List<ProxyHostHealth> _healthStatuses = new();
+    private List<NotifyMessage> _recentMessages = new();
     private int _runningContainers;
     private int _totalContainers;
     private int _proxyHosts;
     private int _enabledProxyHosts;
     private int _certificates;
     private int _expiringCertificates;
-    private bool _dockerConnected;
+    private int _healthyHosts;
+    private int _unhealthyHosts;
+    private long _panelMemory;
+    private bool _loading = true;
+    private bool? _dockerConnected;
     private bool? _nginxOk;
+    private string? _dockerError;
+    private string? _nginxError;
+    private DateTime? _lastUpdated;
 
-    [Inject] private NavigationManager Navigation { get; set; } = default!;
+    private string Greeting => DateTime.Now.Hour switch
+    {
+        < 6 => "夜深了",
+        < 12 => "早上好",
+        < 18 => "下午好",
+        _ => "晚上好"
+    };
+
+    private string OverallStatusText => _loading ? "正在检查" : HasIncident ? "需要关注" : "运行平稳";
+    private bool HasIncident => _dockerConnected == false || _nginxOk == false || _unhealthyHosts > 0 || _expiringCertificates > 0;
+    private int ContainerRate => Percent(_runningContainers, _totalContainers);
+    private int ProxyRate => Percent(_enabledProxyHosts, _proxyHosts);
+    private int HealthRate => Percent(_healthyHosts, _healthStatuses.Count);
+    private IEnumerable<ProxyHostHealth> OrderedHealthStatuses => _healthStatuses
+        .OrderBy(h => h.Status == HealthStatus.Healthy)
+        .ThenByDescending(h => h.LastChecked);
+
+    private string DockerTone => _dockerConnected switch { true => "healthy", false => "fault", _ => "pending" };
+    private string NginxTone => _nginxOk switch { true => "healthy", false => "fault", _ => "pending" };
+    private string HealthTone => _unhealthyHosts > 0 ? "fault" : _healthStatuses.Count > 0 ? "healthy" : "pending";
+    private string CertificateTone => _expiringCertificates > 0 ? "warning" : _certificates > 0 ? "healthy" : "pending";
+    private string DockerStatusText => _dockerConnected switch { true => "已连接", false => "不可用", _ => "检查中" };
+    private string NginxStatusText => _nginxOk switch { true => "配置有效", false => "配置异常", _ => "检查中" };
+    private string HealthStatusText => _unhealthyHosts > 0 ? $"{_unhealthyHosts} 个异常" : _healthStatuses.Count > 0 ? "全部正常" : "等待数据";
+    private string CertificateStatusText => _expiringCertificates > 0 ? $"{_expiringCertificates} 张将到期" : _certificates > 0 ? "状态正常" : "尚未配置";
 
     protected override async Task OnInitializedAsync()
     {
+        HealthCheckService.OnHealthCheckCompleted += OnHealthCheckCompleted;
+        await RefreshAsync();
+    }
+
+    private async Task RefreshAsync()
+    {
+        if (_loading && _lastUpdated.HasValue)
+            return;
+
+        _loading = true;
+        _dockerError = null;
+        _nginxError = null;
+
+        var containersTask = DockerService.ListContainersAsync();
+        var nginxTask = NginxService.ValidateConfigAsync();
+
         try
         {
-            var containers = await DockerService.ListContainersAsync();
+            var containers = await containersTask;
             _totalContainers = containers.Count;
             _runningContainers = containers.Count(c => c.IsRunning);
             _dockerConnected = true;
         }
-        catch
+        catch (Exception ex)
         {
-            // Docker may be unreachable; the status tag reports it.
             _dockerConnected = false;
+            _dockerError = ShortError(ex.Message);
+        }
+
+        try
+        {
+            _nginxOk = await nginxTask;
+            if (_nginxOk == false)
+                _nginxError = ShortError(NginxService.LastError ?? "配置校验失败");
+        }
+        catch (Exception ex)
+        {
+            _nginxOk = false;
+            _nginxError = ShortError(ex.Message);
         }
 
         var hosts = ConfigService.LoadProxyHosts();
@@ -135,19 +280,64 @@
         var certs = ConfigService.LoadCertificates();
         _certificates = certs.Count;
         _expiringCertificates = certs.Count(c => c.IsExpiringSoon || c.IsExpired);
+
+        UpdateHealthData();
+        _panelMemory = MonitorService.GetCurrentMetrics().MemoryUsed;
+        _recentMessages = NotificationService.GetRecentMessages(12);
+        _lastUpdated = DateTime.Now;
+        _loading = false;
     }
 
-    protected override async Task OnAfterRenderAsync(bool firstRender)
+    private void OnHealthCheckCompleted(string hostId, HealthCheckResult result)
     {
-        if (!firstRender)
-            return;
-
-        // Runs nginx -t, so keep it off the initial render path.
-        _nginxOk = await NginxService.ValidateConfigAsync();
-        await InvokeAsync(StateHasChanged);
+        _ = InvokeAsync(() =>
+        {
+            UpdateHealthData();
+            _recentMessages = NotificationService.GetRecentMessages(12);
+            StateHasChanged();
+        });
     }
 
-    private void NavigateToContainers() => Navigation.NavigateTo("/docker/containers");
-    private void NavigateToProxy() => Navigation.NavigateTo("/proxy/hosts");
-    private void NavigateToCertificates() => Navigation.NavigateTo("/certificates");
+    private void UpdateHealthData()
+    {
+        _healthStatuses.Clear();
+        _healthStatuses.AddRange(HealthCheckService.GetAllHealthStatus());
+        _healthyHosts = _healthStatuses.Count(h => h.Status == HealthStatus.Healthy);
+        _unhealthyHosts = _healthStatuses.Count(h => h.Status is HealthStatus.Unhealthy or HealthStatus.Error);
+    }
+
+    private static int Percent(int value, int total) => total <= 0 ? 0 : (int)Math.Round(value * 100d / total);
+    private static string HealthClass(HealthStatus status) => status switch
+    {
+        HealthStatus.Healthy => "healthy",
+        HealthStatus.Unhealthy => "fault",
+        HealthStatus.Error => "fault",
+        _ => "pending"
+    };
+    private static string EventClass(string level) => level switch
+    {
+        "error" => "fault",
+        "warning" => "warning",
+        _ => "info"
+    };
+    private static string FormatBytes(long bytes) => bytes <= 0 ? "--" : bytes switch
+    {
+        >= 1024L * 1024 * 1024 => $"{bytes / (1024d * 1024 * 1024):0.0} GB",
+        >= 1024L * 1024 => $"{bytes / (1024d * 1024):0} MB",
+        _ => $"{bytes / 1024d:0} KB"
+    };
+    private static string FormatAge(DateTime timestamp)
+    {
+        var age = DateTime.UtcNow - timestamp.ToUniversalTime();
+        if (age.TotalSeconds < 60) return "刚刚";
+        if (age.TotalMinutes < 60) return $"{(int)age.TotalMinutes} 分钟前";
+        if (age.TotalHours < 24) return $"{(int)age.TotalHours} 小时前";
+        return timestamp.ToLocalTime().ToString("MM-dd HH:mm");
+    }
+    private static string ShortError(string value) => value.Length > 96 ? value[..93] + "..." : value;
+
+    public void Dispose()
+    {
+        HealthCheckService.OnHealthCheckCompleted -= OnHealthCheckCompleted;
+    }
 }

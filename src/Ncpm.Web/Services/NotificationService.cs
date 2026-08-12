@@ -9,11 +9,14 @@ public class NotificationService : IDisposable
 {
     private const int MaxRetryQueueLength = 200;
     private const int MaxDeliveryAttempts = 4;
+    private const int MaxRecentMessages = 100;
 
     private readonly ConfigService _configService;
     private readonly ILogger<NotificationService> _logger;
     private readonly IHttpClientFactory _httpClientFactory;
-    private readonly ConcurrentQueue<NotifyMessage> _retryQueue = new();
+    private readonly ConcurrentQueue<PendingDelivery> _retryQueue = new();
+    private readonly ConcurrentQueue<NotifyMessage> _recentMessages = new();
+    private readonly SemaphoreSlim _retryGate = new(1, 1);
     private Timer? _retryTimer;
     private bool _disposed;
 
@@ -53,21 +56,64 @@ public class NotificationService : IDisposable
 
     public async Task SendAsync(NotifyMessage message)
     {
+        // Keep a small in-memory activity feed even when outbound notifications
+        // are disabled. The dashboard uses this to explain recent health changes
+        // without requiring a webhook provider.
+        _recentMessages.Enqueue(CloneForActivityFeed(message));
+        while (_recentMessages.Count > MaxRecentMessages)
+        {
+            _recentMessages.TryDequeue(out _);
+        }
+
         var config = _configService.LoadAppConfig().Notification;
         if (!config.Enabled || !config.Providers.Any(p => p.IsEnabled))
             return;
 
-        message.Attempts++;
-
         var tasks = config.Providers
             .Where(p => p.IsEnabled)
-            .Select(p => SendToProviderAsync(p, message));
+            .Select(p => SendToProviderAsync(p, CloneForDelivery(message)));
 
         await Task.WhenAll(tasks);
     }
 
+    public List<NotifyMessage> GetRecentMessages(int count = 20)
+    {
+        return _recentMessages
+            .TakeLast(Math.Clamp(count, 1, MaxRecentMessages))
+            .Reverse()
+            .Select(CloneForActivityFeed)
+            .ToList();
+    }
+
+    private static NotifyMessage CloneForActivityFeed(NotifyMessage message)
+    {
+        return new NotifyMessage
+        {
+            Level = message.Level,
+            Title = message.Title,
+            Body = message.Body,
+            Timestamp = message.Timestamp,
+            Fields = new Dictionary<string, string>(message.Fields),
+            Attempts = message.Attempts
+        };
+    }
+
+    private static NotifyMessage CloneForDelivery(NotifyMessage message)
+    {
+        return new NotifyMessage
+        {
+            Level = message.Level,
+            Title = message.Title,
+            Body = message.Body,
+            Timestamp = message.Timestamp,
+            Fields = new Dictionary<string, string>(message.Fields),
+            Attempts = message.Attempts
+        };
+    }
+
     public async Task SendToProviderAsync(NotifyProvider provider, NotifyMessage message)
     {
+        message.Attempts++;
         try
         {
             var (url, content, headers) = provider.Type switch
@@ -105,7 +151,7 @@ public class NotificationService : IDisposable
             // Bound the queue: an unreachable provider would otherwise grow it without limit.
             if (_retryQueue.Count < MaxRetryQueueLength)
             {
-                _retryQueue.Enqueue(message);
+                _retryQueue.Enqueue(new PendingDelivery(provider.Name, CloneForDelivery(message)));
             }
         }
     }
@@ -202,19 +248,48 @@ public class NotificationService : IDisposable
         return (provider.Url, content, new Dictionary<string, string>());
     }
 
-    private void ProcessRetries(object? state)
+    private async void ProcessRetries(object? state)
     {
-        var config = _configService.LoadAppConfig().Notification;
-        if (!config.Enabled) return;
+        if (!await _retryGate.WaitAsync(0))
+            return;
 
-        var processed = 0;
-        while (processed < 10 && _retryQueue.TryDequeue(out var message))
+        try
         {
-            // Preserve the attempt count so retries eventually stop.
-            _ = SendAsync(message);
-            processed++;
+            var config = _configService.LoadAppConfig().Notification;
+            if (!config.Enabled)
+                return;
+
+            var processed = 0;
+            while (processed < 10 && _retryQueue.TryDequeue(out var pending))
+            {
+                var provider = config.Providers.FirstOrDefault(item =>
+                    item.IsEnabled
+                    && item.Name.Equals(pending.ProviderName, StringComparison.Ordinal));
+                if (provider == null)
+                {
+                    _logger.LogWarning(
+                        "Dropping notification retry because provider {Provider} is missing or disabled",
+                        pending.ProviderName);
+                }
+                else
+                {
+                    await SendToProviderAsync(provider, pending.Message);
+                }
+
+                processed++;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Notification retry sweep failed");
+        }
+        finally
+        {
+            _retryGate.Release();
         }
     }
+
+    private sealed record PendingDelivery(string ProviderName, NotifyMessage Message);
 
     public void Dispose()
     {

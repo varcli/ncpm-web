@@ -21,8 +21,12 @@ public class DockerService : IDisposable
     // Hosts currently failing, keyed by host id, holding the last error message.
     private readonly ConcurrentDictionary<string, string> _failingHosts = new();
     private readonly string _hostsFilePath;
+    private readonly object _configurationLock = new();
     private List<DockerHost> _hosts = new();
+    private string _configuredDefaultHost = string.Empty;
+    private int _apiTimeoutSeconds = 30;
     private Timer? _healthCheckTimer;
+    private int _checkingHosts;
     private bool _disposed;
 
     public event Action<string, DockerHostStatus>? OnHostStatusChanged;
@@ -31,12 +35,17 @@ public class DockerService : IDisposable
     {
         _configService = configService;
         _logger = logger;
-        _hostsFilePath = Path.Combine("data", "config", "docker-hosts.yml");
+        _hostsFilePath = Path.Combine(configService.ConfigPath, "docker-hosts.yml");
+
+        var dockerConfig = configService.LoadAppConfig().Docker;
+        _configuredDefaultHost = dockerConfig.Host;
+        _apiTimeoutSeconds = Math.Max(1, dockerConfig.ApiTimeout);
         
         LoadHosts();
         EnsureDefaultHost();
         InitializeClients();
         StartHealthCheck();
+        _configService.OnConfigChanged += ApplyDockerConfiguration;
     }
 
     private void LoadHosts()
@@ -54,6 +63,27 @@ public class DockerService : IDisposable
                 .WithNamingConvention(CamelCaseNamingConvention.Instance)
                 .Build();
             _hosts = deserializer.Deserialize<List<DockerHost>>(content) ?? new List<DockerHost>();
+            var containedLegacyPassword = false;
+            foreach (var host in _hosts)
+            {
+                if (!string.IsNullOrEmpty(host.SshPassword))
+                {
+                    host.SshPassword = null;
+                    containedLegacyPassword = true;
+                }
+
+                if (host.Type == DockerHostType.Ssh)
+                {
+                    host.IsEnabled = false;
+                    host.LastError = "SSH Docker transport is not supported; configure HTTPS/mTLS instead";
+                }
+            }
+
+            if (containedLegacyPassword)
+            {
+                SaveHosts();
+                _logger.LogWarning("Removed unsupported legacy SSH passwords from Docker host configuration");
+            }
         }
         catch (Exception ex)
         {
@@ -76,7 +106,19 @@ public class DockerService : IDisposable
                 .WithNamingConvention(CamelCaseNamingConvention.Instance)
                 .Build();
             var content = serializer.Serialize(_hosts);
-            File.WriteAllText(_hostsFilePath, content);
+            var temp = _hostsFilePath + $".{Guid.NewGuid():N}.tmp";
+            try
+            {
+                File.WriteAllText(temp, content);
+                RestrictFileToOwner(temp);
+                File.Move(temp, _hostsFilePath, overwrite: true);
+                RestrictFileToOwner(_hostsFilePath);
+            }
+            finally
+            {
+                if (File.Exists(temp))
+                    File.Delete(temp);
+            }
         }
         catch (Exception ex)
         {
@@ -89,20 +131,42 @@ public class DockerService : IDisposable
         if (_hosts.Any(h => h.IsDefault))
             return;
 
-        var localHost = new DockerHost
+        var configuredHost = _configService.LoadAppConfig().Docker.Host;
+        var localHost = CreateDefaultHost(configuredHost);
+
+        _hosts.Add(localHost);
+        SaveHosts();
+    }
+
+    private static DockerHost CreateDefaultHost(string configuredHost)
+    {
+        var host = new DockerHost
         {
             Id = "local",
             Name = "Local Docker",
-            Host = "unix:///var/run/docker.sock",
-            Type = DockerHostType.Local,
             IsEnabled = true,
             IsDefault = true,
             Description = "Local Docker daemon",
             CreatedAt = DateTime.UtcNow
         };
 
-        _hosts.Add(localHost);
-        SaveHosts();
+        if (Uri.TryCreate(configuredHost, UriKind.Absolute, out var uri)
+            && uri.Scheme is "tcp" or "http" or "https")
+        {
+            host.Type = DockerHostType.Tcp;
+            host.Host = uri.Host;
+            host.TcpPort = uri.IsDefaultPort ? (uri.Scheme == "https" ? 2376 : 2375) : uri.Port;
+            host.UseTls = uri.Scheme == "https";
+        }
+        else
+        {
+            host.Type = DockerHostType.Local;
+            host.Host = string.IsNullOrWhiteSpace(configuredHost)
+                ? "unix:///var/run/docker.sock"
+                : configuredHost;
+        }
+
+        return host;
     }
 
     private void InitializeClients()
@@ -125,10 +189,74 @@ public class DockerService : IDisposable
 
     private DockerClient CreateClient(DockerHost host)
     {
+        if (host.Type == DockerHostType.Ssh)
+        {
+            throw new NotSupportedException(
+                "SSH Docker transport is not supported. Expose a TLS-protected Docker API or use a socket proxy.");
+        }
+
         var uri = new Uri(host.ConnectionString);
         
-        var config = new DockerClientConfiguration(uri);
+        Credentials credentials = host.UseTls
+            && (!string.IsNullOrWhiteSpace(host.TlsCaCertPath)
+                || !string.IsNullOrWhiteSpace(host.TlsClientCertPath)
+                || !string.IsNullOrWhiteSpace(host.TlsClientKeyPath))
+            ? new DockerTlsCredentials(
+                host.TlsCaCertPath,
+                host.TlsClientCertPath,
+                host.TlsClientKeyPath)
+            : new AnonymousCredentials();
+        var config = new DockerClientConfiguration(
+            uri,
+            credentials,
+            defaultTimeout: TimeSpan.FromSeconds(_apiTimeoutSeconds));
         return config.CreateClient();
+    }
+
+    private void ApplyDockerConfiguration()
+    {
+        lock (_configurationLock)
+        {
+            var config = _configService.LoadAppConfig().Docker;
+            var hostChanged = !string.Equals(
+                config.Host,
+                _configuredDefaultHost,
+                StringComparison.Ordinal);
+            var timeoutChanged = config.ApiTimeout != _apiTimeoutSeconds;
+
+            if (!hostChanged && !timeoutChanged)
+                return;
+
+            _apiTimeoutSeconds = Math.Max(1, config.ApiTimeout);
+            if (hostChanged)
+            {
+                _configuredDefaultHost = config.Host;
+                var existing = _hosts.FirstOrDefault(h => h.Id == "local");
+                if (existing != null)
+                {
+                    var replacement = CreateDefaultHost(config.Host);
+                    replacement.Name = existing.Name;
+                    replacement.Description = existing.Description;
+                    replacement.IsEnabled = existing.IsEnabled;
+                    replacement.IsDefault = existing.IsDefault;
+                    replacement.CreatedAt = existing.CreatedAt;
+                    _hosts[_hosts.IndexOf(existing)] = replacement;
+                    SaveHosts();
+                }
+            }
+
+            foreach (var item in _clients.ToArray())
+            {
+                if (_clients.TryRemove(item.Key, out var client))
+                    client.Dispose();
+            }
+
+            InitializeClients();
+            _logger.LogInformation(
+                "Applied Docker configuration (host changed: {HostChanged}, timeout: {Timeout}s)",
+                hostChanged,
+                _apiTimeoutSeconds);
+        }
     }
 
     private void StartHealthCheck()
@@ -136,6 +264,9 @@ public class DockerService : IDisposable
         // Exceptions must not escape a timer callback, or they take down the process.
         _healthCheckTimer = new Timer(async void (_) =>
         {
+            if (Interlocked.CompareExchange(ref _checkingHosts, 1, 0) != 0)
+                return;
+
             try
             {
                 await CheckAllHosts();
@@ -143,6 +274,10 @@ public class DockerService : IDisposable
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Docker host health sweep failed");
+            }
+            finally
+            {
+                Volatile.Write(ref _checkingHosts, 0);
             }
         }, null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(30));
     }
@@ -214,17 +349,19 @@ public class DockerService : IDisposable
 
     public List<DockerHost> GetAllHosts()
     {
-        return _hosts.ToList();
+        return _hosts.Select(CloneHost).ToList();
     }
 
     public DockerHost? GetHost(string hostId)
     {
-        return _hosts.FirstOrDefault(h => h.Id == hostId);
+        var host = _hosts.FirstOrDefault(h => h.Id == hostId);
+        return host == null ? null : CloneHost(host);
     }
 
     public DockerHost? GetDefaultHost()
     {
-        return _hosts.FirstOrDefault(h => h.IsDefault && h.IsEnabled);
+        var host = _hosts.FirstOrDefault(h => h.IsDefault && h.IsEnabled);
+        return host == null ? null : CloneHost(host);
     }
 
     /// <summary>
@@ -262,21 +399,24 @@ public class DockerService : IDisposable
             }
         }
 
-        _hosts.Add(host);
-        SaveHosts();
+        var stored = CloneHost(host);
+        stored.CreatedAt = stored.CreatedAt == default ? DateTime.UtcNow : stored.CreatedAt;
+        _hosts.Add(stored);
 
-        if (host.IsEnabled)
+        if (stored.IsEnabled)
         {
             try
             {
-                var client = CreateClient(host);
-                _clients[host.Id] = client;
+                var client = CreateClient(stored);
+                _clients[stored.Id] = client;
             }
             catch (Exception ex)
             {
-                host.LastError = ex.Message;
+                stored.LastError = ex.Message;
             }
         }
+
+        SaveHosts();
 
         return true;
     }
@@ -298,30 +438,35 @@ public class DockerService : IDisposable
         }
 
         var index = _hosts.IndexOf(existing);
-        _hosts[index] = host;
-        SaveHosts();
+        var stored = CloneHost(host);
+        _hosts[index] = stored;
 
-        // Reinitialize client if connection settings changed
-        if (existing.Host != host.Host || existing.Type != host.Type)
+        // Always rebuild the client: port, TLS, enabled state and future
+        // credential fields all affect the transport, not just host/type.
+        if (_clients.TryRemove(host.Id, out var oldClient))
         {
-            if (_clients.TryRemove(host.Id, out var oldClient))
-            {
-                oldClient.Dispose();
-            }
+            oldClient.Dispose();
+        }
 
-            if (host.IsEnabled)
+        if (stored.IsEnabled)
+        {
+            try
             {
-                try
-                {
-                    var client = CreateClient(host);
-                    _clients[host.Id] = client;
-                }
-                catch (Exception ex)
-                {
-                    host.LastError = ex.Message;
-                }
+                var client = CreateClient(stored);
+                _clients[stored.Id] = client;
+                stored.LastError = null;
+            }
+            catch (Exception ex)
+            {
+                stored.LastError = ex.Message;
             }
         }
+        else
+        {
+            _hostStatuses.TryRemove(stored.Id, out _);
+        }
+
+        SaveHosts();
 
         return true;
     }
@@ -372,11 +517,16 @@ public class DockerService : IDisposable
             : _hosts.Where(h => h.Id == hostId && h.IsEnabled).ToList();
 
         var allContainers = new List<DockerContainer>();
+        var successfulHosts = 0;
+        Exception? lastError = null;
 
         foreach (var host in hosts)
         {
             if (!_clients.TryGetValue(host.Id, out var client))
+            {
+                lastError = new InvalidOperationException($"Docker host {host.Name} has no active client");
                 continue;
+            }
 
             try
             {
@@ -404,15 +554,113 @@ public class DockerService : IDisposable
                 }).ToList();
 
                 allContainers.AddRange(hostContainers);
+                successfulHosts++;
                 ClearHostFailure(host);
             }
             catch (Exception ex)
             {
+                lastError = ex;
                 LogHostFailure(host, ex, "list containers");
             }
         }
 
+        if (hosts.Count > 0 && successfulHosts == 0)
+        {
+            throw new InvalidOperationException(
+                $"Unable to query any Docker host: {lastError?.Message ?? "no active client"}",
+                lastError);
+        }
+
         return allContainers;
+    }
+
+    /// <summary>
+    /// Connects the panel container to a local user-defined network so nginx can
+    /// resolve an automatically discovered container by name. Remote daemons
+    /// cannot attach this panel container and therefore return false.
+    /// </summary>
+    public async Task<bool> EnsurePanelConnectedToNetworkAsync(
+        string hostId,
+        string networkName,
+        CancellationToken cancellationToken = default)
+    {
+        var host = _hosts.FirstOrDefault(h => h.Id == hostId);
+        if (host == null || host.Type != DockerHostType.Local
+            || !string.Equals(
+                Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER"),
+                "true",
+                StringComparison.OrdinalIgnoreCase)
+            || !_clients.TryGetValue(hostId, out var client))
+        {
+            return false;
+        }
+
+        var panelContainer = Environment.GetEnvironmentVariable("HOSTNAME") ?? Environment.MachineName;
+        try
+        {
+            var inspect = await client.Containers.InspectContainerAsync(panelContainer, cancellationToken);
+            if (inspect.NetworkSettings?.Networks?.ContainsKey(networkName) == true)
+                return true;
+
+            await client.Networks.ConnectNetworkAsync(
+                networkName,
+                new NetworkConnectParameters { Container = inspect.ID },
+                cancellationToken);
+            _logger.LogInformation("Connected panel container to Docker network {Network}", networkName);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not connect panel container to Docker network {Network}", networkName);
+            return false;
+        }
+    }
+
+    public string GetReachableHostAddress(string hostId)
+    {
+        var host = _hosts.FirstOrDefault(h => h.Id == hostId);
+        if (host == null || host.Type == DockerHostType.Local)
+            return "host.docker.internal";
+
+        return host.Host;
+    }
+
+    private static DockerHost CloneHost(DockerHost host) => new()
+    {
+        Id = host.Id,
+        Name = host.Name,
+        Host = host.Host,
+        Type = host.Type,
+        IsEnabled = host.IsEnabled,
+        IsDefault = host.IsDefault,
+        Description = host.Description,
+        CreatedAt = host.CreatedAt,
+        LastError = host.LastError,
+        LastChecked = host.LastChecked,
+        IsConnected = host.IsConnected,
+        ContainerCount = host.ContainerCount,
+        TcpPort = host.TcpPort,
+        UseTls = host.UseTls,
+        TlsCaCertPath = host.TlsCaCertPath,
+        TlsClientCertPath = host.TlsClientCertPath,
+        TlsClientKeyPath = host.TlsClientKeyPath,
+        SshPort = host.SshPort,
+        SshUser = host.SshUser,
+        SshKeyPath = host.SshKeyPath
+    };
+
+    private static void RestrictFileToOwner(string path)
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+        try
+        {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+        catch
+        {
+            // Some bind-mounted filesystems do not expose Unix permission changes.
+        }
     }
 
     /// <summary>
@@ -472,6 +720,7 @@ public class DockerService : IDisposable
                     Status = inspect.State.Running ? "running" : "stopped",
                     Created = inspect.Created,
                     Labels = inspect.Config.Labels?.ToDictionary(l => l.Key, l => l.Value) ?? new(),
+                    Ports = MapInspectPorts(inspect.NetworkSettings),
                     HostId = host.Id,
                     HostName = host.Name
                 };
@@ -605,11 +854,12 @@ public class DockerService : IDisposable
 
         try
         {
+            var inspect = await client.Containers.InspectContainerAsync(containerId, cancellationToken);
             // The multiplexed overload is required: for containers created without a
             // TTY, Docker frames stdout/stderr with an 8-byte header per chunk. The
             // obsolete overload returns those headers inline and corrupts every line.
             using var stream = await client.Containers.GetContainerLogsAsync(containerId,
-                tty: false,
+                tty: inspect.Config.Tty,
                 new ContainerLogsParameters
                 {
                     ShowStdout = true,
@@ -631,6 +881,40 @@ public class DockerService : IDisposable
             _logger.LogError(ex, "Failed to get logs for container {ContainerId}", containerId);
             return new List<ContainerLogEntry>();
         }
+    }
+
+    private static List<PortMapping> MapInspectPorts(NetworkSettings? settings)
+    {
+        var result = new List<PortMapping>();
+        if (settings?.Ports == null)
+            return result;
+
+        foreach (var (containerPort, bindings) in settings.Ports)
+        {
+            var parts = containerPort.Split('/', 2);
+            if (!int.TryParse(parts[0], out var privatePort))
+                continue;
+
+            var protocol = parts.Length > 1 ? parts[1] : "tcp";
+            if (bindings == null || bindings.Count == 0)
+            {
+                result.Add(new PortMapping { PrivatePort = privatePort, Type = protocol });
+                continue;
+            }
+
+            foreach (var binding in bindings)
+            {
+                result.Add(new PortMapping
+                {
+                    Ip = binding.HostIP,
+                    PrivatePort = privatePort,
+                    PublicPort = int.TryParse(binding.HostPort, out var publicPort) ? publicPort : null,
+                    Type = protocol
+                });
+            }
+        }
+
+        return result;
     }
 
     /// <summary>
@@ -1159,14 +1443,19 @@ public class DockerService : IDisposable
                 Image = request.Image,
                 Env = request.Env.Select(e => $"{e.Key}={e.Value}").ToList(),
                 Labels = request.Labels,
+                ExposedPorts = request.Ports
+                    .GroupBy(p => $"{p.PrivatePort}/{p.Type?.ToLowerInvariant() ?? "tcp"}")
+                    .ToDictionary(g => g.Key, _ => new EmptyStruct()),
                 HostConfig = new HostConfig
                 {
                     PortBindings = request.Ports
-                        .Where(p => p.PublicPort.HasValue)
                         .GroupBy(p => $"{p.PrivatePort}/{p.Type?.ToLowerInvariant() ?? "tcp"}")
                         .ToDictionary(
                             g => g.Key,
-                            g => g.Select(p => new PortBinding { HostPort = p.PublicPort!.Value.ToString() }).ToList()
+                            g => g.Select(p => new PortBinding
+                                {
+                                    HostPort = p.PublicPort?.ToString() ?? string.Empty
+                                }).ToList()
                                 as IList<PortBinding>),
                     Binds = request.Mounts
                         .Select(m => m.ReadOnly
@@ -1374,11 +1663,19 @@ public class DockerService : IDisposable
             ? _hosts.Where(h => h.IsEnabled).ToList()
             : _hosts.Where(h => h.Id == hostId && h.IsEnabled).ToList();
 
+        var attempted = 0;
+        var succeeded = 0;
+        var errors = new List<string>();
+
         foreach (var host in hosts)
         {
             if (!_clients.TryGetValue(host.Id, out var client))
+            {
+                errors.Add($"{host.Name}: no active client");
                 continue;
+            }
 
+            attempted++;
             try
             {
                 switch (category.ToLowerInvariant())
@@ -1405,15 +1702,18 @@ public class DockerService : IDisposable
                         break;
                 }
 
-                result.Success = true;
+                succeeded++;
                 _logger.LogInformation("Pruned {Category} on {Host}", category, host.Name);
             }
             catch (Exception ex)
             {
-                result.Error = ex.Message;
+                errors.Add($"{host.Name}: {ex.Message}");
                 _logger.LogError(ex, "Prune {Category} failed on {Host}", category, host.Name);
             }
         }
+
+        result.Success = attempted > 0 && succeeded == attempted && errors.Count == 0;
+        result.Error = errors.Count == 0 ? null : string.Join("; ", errors);
 
         return result;
     }
@@ -1424,6 +1724,7 @@ public class DockerService : IDisposable
     {
         if (!_disposed)
         {
+            _configService.OnConfigChanged -= ApplyDockerConfiguration;
             _healthCheckTimer?.Dispose();
             foreach (var client in _clients.Values)
             {

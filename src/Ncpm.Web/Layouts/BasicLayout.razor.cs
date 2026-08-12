@@ -197,6 +197,13 @@ namespace Ncpm.Layouts
                             Name = "基本配置",
                             Key = "settings-config",
                             Icon = "file-text",
+                        },
+                        new MenuDataItem
+                        {
+                            Path = "/settings/account",
+                            Name = "账号安全",
+                            Key = "settings-account",
+                            Icon = "safety",
                         }
                     }
                 }

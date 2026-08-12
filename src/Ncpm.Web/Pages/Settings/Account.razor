@@ -1,0 +1,128 @@
+@page "/settings/account"
+@using System.Security.Claims
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Components.Authorization
+@using Ncpm.Services
+@attribute [Authorize]
+@inject AuthService AuthService
+@inject AuthenticationStateProvider AuthenticationStateProvider
+@inject Ncpm.Services.ConfigService ConfigService
+@inject IMessageService Message
+@inject NavigationManager Navigation
+
+<PageHeader Title="账号安全" Subtitle="查看当前账号并更新登录密码" />
+
+@if (!_requireAuth)
+{
+    <Alert Type="@AlertType.Warning" ShowIcon="true"
+           Message="当前已关闭登录认证"
+           Description="请先在系统设置中启用认证，再管理账号密码。生产环境不应关闭认证。" />
+}
+else if (_user == null)
+{
+    <Spin />
+}
+else
+{
+    @if (_user.MustChangePassword)
+    {
+        <Alert Type="@AlertType.Error" ShowIcon="true" Style="margin-bottom: 16px;"
+               Message="必须修改初始密码"
+               Description="当前账号仍在使用初始化密码。修改成功后所有旧会话都会被撤销，需要重新登录。" />
+    }
+
+    <Row Gutter="16">
+        <AntDesign.Col Span="10">
+            <Card Title="当前账号">
+                <Descriptions Bordered Column="1">
+                    <DescriptionsItem Title="用户名">@_user.Username</DescriptionsItem>
+                    <DescriptionsItem Title="显示名称">@(_user.DisplayName ?? "-")</DescriptionsItem>
+                    <DescriptionsItem Title="角色"><Tag Color="@("blue")">@_user.Role</Tag></DescriptionsItem>
+                    <DescriptionsItem Title="上次登录">
+                        @(_user.LastLoginAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") ?? "-")
+                    </DescriptionsItem>
+                </Descriptions>
+            </Card>
+        </AntDesign.Col>
+        <AntDesign.Col Span="14">
+            <Card Title="修改密码">
+                <Form Model="@_form" Layout="@FormLayout.Vertical" OnFinish="ChangePassword">
+                    <FormItem Label="当前密码" Required>
+                        <InputPassword @bind-Value="@_form.CurrentPassword" />
+                    </FormItem>
+                    <FormItem Label="新密码" Required>
+                        <InputPassword @bind-Value="@_form.NewPassword" />
+                    </FormItem>
+                    <FormItem Label="确认新密码" Required>
+                        <InputPassword @bind-Value="@_form.ConfirmPassword" />
+                    </FormItem>
+                    <Alert Type="@AlertType.Info" ShowIcon="true" Style="margin-bottom: 16px;"
+                           Message="密码要求"
+                           Description="至少 12 个字符，并同时包含大写字母、小写字母、数字和特殊字符。" />
+                    <Button Type="@ButtonType.Primary" HtmlType="submit" Loading="@_saving">
+                        修改密码并重新登录
+                    </Button>
+                </Form>
+            </Card>
+        </AntDesign.Col>
+    </Row>
+}
+
+@code {
+    private readonly PasswordForm _form = new();
+    private Ncpm.Data.User? _user;
+    private bool _saving;
+    private bool _requireAuth;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _requireAuth = ConfigService.LoadAppConfig().Security.RequireAuth;
+        if (!_requireAuth)
+            return;
+
+        var state = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+        var userId = state.User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!string.IsNullOrWhiteSpace(userId))
+            _user = AuthService.GetUser(userId);
+    }
+
+    private async Task ChangePassword()
+    {
+        if (_user == null)
+            return;
+        if (_form.NewPassword != _form.ConfirmPassword)
+        {
+            Message.Error("两次输入的新密码不一致");
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            if (!AuthService.ChangeOwnPassword(
+                    _user.Id,
+                    _form.CurrentPassword,
+                    _form.NewPassword,
+                    out var error))
+            {
+                Message.Error(error ?? "密码修改失败");
+                return;
+            }
+
+            if (AuthenticationStateProvider is AuthStateProvider provider)
+                await provider.NotifyUserLogout();
+            Navigation.NavigateTo("/login", forceLoad: true);
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private sealed class PasswordForm
+    {
+        public string CurrentPassword { get; set; } = string.Empty;
+        public string NewPassword { get; set; } = string.Empty;
+        public string ConfirmPassword { get; set; } = string.Empty;
+    }
+}

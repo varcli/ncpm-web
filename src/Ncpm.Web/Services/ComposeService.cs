@@ -94,22 +94,27 @@ public class ComposeService
         // Managed stacks first so IsManaged and the on-disk paths win.
         foreach (var project in LoadManagedProjects(hostId))
         {
-            projects[project.Name] = project;
+            projects[ProjectKey(project.HostId, project.Name)] = project;
         }
 
         var containers = await _dockerService.ListContainersAsync(hostId, cancellationToken);
 
         foreach (var group in containers
                      .Where(c => c.Labels.ContainsKey(ComposeLabels.Project))
-                     .GroupBy(c => c.Labels[ComposeLabels.Project]))
+                     .GroupBy(c => new
+                     {
+                         c.HostId,
+                         Project = c.Labels[ComposeLabels.Project]
+                     }))
         {
-            var name = group.Key;
+            var name = group.Key.Project;
             if (string.IsNullOrWhiteSpace(name))
                 continue;
 
             var first = group.First();
+            var key = ProjectKey(group.Key.HostId, name);
 
-            if (!projects.TryGetValue(name, out var project))
+            if (!projects.TryGetValue(key, out var project))
             {
                 project = new ComposeProject
                 {
@@ -120,7 +125,7 @@ public class ComposeService
                     HostId = first.HostId,
                     HostName = first.HostName
                 };
-                projects[name] = project;
+                projects[key] = project;
             }
 
             project.Services = group
@@ -231,14 +236,17 @@ public class ComposeService
 
     public async Task<ComposeProject?> GetProjectAsync(
         string name,
+        string? hostId = null,
         CancellationToken cancellationToken = default)
     {
         if (!IsValidProjectName(name))
             return null;
 
-        var projects = await ListProjectsAsync(null, cancellationToken);
+        var projects = await ListProjectsAsync(hostId, cancellationToken);
         return projects.FirstOrDefault(p => p.Name == name);
     }
+
+    private static string ProjectKey(string hostId, string name) => $"{hostId}\0{name}";
 
     #endregion
 
@@ -263,6 +271,75 @@ public class ComposeService
             LastError = ex.Message;
             _logger.LogError(ex, "Failed to read compose file for {Project}", name);
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Validates YAML with <c>docker compose config -q</c> without changing the
+    /// managed stack. The temporary candidate is removed even when validation
+    /// fails or is cancelled.
+    /// </summary>
+    public async Task<ComposeCommandResult> ValidateStackFileAsync(
+        string name,
+        string content,
+        string? hostId = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsValidProjectName(name))
+            return Fail("项目名只能包含小写字母、数字、下划线和短横线，且以字母或数字开头");
+
+        var dir = ProjectDir(name);
+        var createdDirectory = !Directory.Exists(dir);
+
+        try
+        {
+            Directory.CreateDirectory(dir);
+        }
+        catch (Exception ex)
+        {
+            return Fail($"无法创建项目目录: {ex.Message}");
+        }
+
+        var tempFile = Path.Combine(dir, $".candidate-{Guid.NewGuid():N}.yml");
+        try
+        {
+            await File.WriteAllTextAsync(tempFile, content, cancellationToken);
+            var result = await RunComposeAsync(
+                hostId,
+                dir,
+                ["-f", tempFile, "-p", name, "config", "-q"],
+                cancellationToken);
+
+            if (result.Success)
+            {
+                LastError = null;
+                result.Output = "配置校验通过，未保存任何更改";
+            }
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+            _logger.LogError(ex, "Failed to validate compose file for {Project}", name);
+            return Fail(ex.Message);
+        }
+        finally
+        {
+            TryDelete(tempFile);
+            if (createdDirectory)
+            {
+                try
+                {
+                    if (Directory.Exists(dir) && !Directory.EnumerateFileSystemEntries(dir).Any())
+                        Directory.Delete(dir);
+                }
+                catch
+                {
+                    // A harmless empty directory is preferable to hiding the
+                    // validation result with a cleanup exception.
+                }
+            }
         }
     }
 
@@ -395,7 +472,8 @@ public class ComposeService
         string project,
         string? service = null,
         bool pullFirst = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? hostId = null)
     {
         var args = new List<string> { "up", "-d", "--remove-orphans" };
         if (pullFirst)
@@ -406,14 +484,15 @@ public class ComposeService
         if (!string.IsNullOrEmpty(service))
             args.Add(service);
 
-        return RunProjectCommandAsync(project, args, cancellationToken);
+        return RunProjectCommandAsync(project, args, cancellationToken, hostId);
     }
 
     public Task<ComposeCommandResult> DownAsync(
         string project,
         bool removeVolumes = false,
         bool removeImages = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? hostId = null)
     {
         var args = new List<string> { "down", "--remove-orphans" };
         if (removeVolumes)
@@ -424,50 +503,56 @@ public class ComposeService
             args.Add("local");
         }
 
-        return RunProjectCommandAsync(project, args, cancellationToken);
+        return RunProjectCommandAsync(project, args, cancellationToken, hostId);
     }
 
     public Task<ComposeCommandResult> RestartAsync(
         string project,
         string? service = null,
-        CancellationToken cancellationToken = default)
-        => RunProjectCommandAsync(project, Compose("restart", service), cancellationToken);
+        CancellationToken cancellationToken = default,
+        string? hostId = null)
+        => RunProjectCommandAsync(project, Compose("restart", service), cancellationToken, hostId);
 
     public Task<ComposeCommandResult> StartAsync(
         string project,
         string? service = null,
-        CancellationToken cancellationToken = default)
-        => RunProjectCommandAsync(project, Compose("start", service), cancellationToken);
+        CancellationToken cancellationToken = default,
+        string? hostId = null)
+        => RunProjectCommandAsync(project, Compose("start", service), cancellationToken, hostId);
 
     public Task<ComposeCommandResult> StopAsync(
         string project,
         string? service = null,
-        CancellationToken cancellationToken = default)
-        => RunProjectCommandAsync(project, Compose("stop", service), cancellationToken);
+        CancellationToken cancellationToken = default,
+        string? hostId = null)
+        => RunProjectCommandAsync(project, Compose("stop", service), cancellationToken, hostId);
 
     public Task<ComposeCommandResult> PullAsync(
         string project,
         string? service = null,
-        CancellationToken cancellationToken = default)
-        => RunProjectCommandAsync(project, Compose("pull", service), cancellationToken);
+        CancellationToken cancellationToken = default,
+        string? hostId = null)
+        => RunProjectCommandAsync(project, Compose("pull", service), cancellationToken, hostId);
 
     /// <summary>Fetches the merged, fully-resolved compose configuration.</summary>
     public Task<ComposeCommandResult> ConfigAsync(
         string project,
-        CancellationToken cancellationToken = default)
-        => RunProjectCommandAsync(project, ["config"], cancellationToken);
+        CancellationToken cancellationToken = default,
+        string? hostId = null)
+        => RunProjectCommandAsync(project, ["config"], cancellationToken, hostId);
 
     public Task<ComposeCommandResult> LogsAsync(
         string project,
         string? service = null,
         int tail = 200,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? hostId = null)
     {
         var args = new List<string> { "logs", "--no-color", "--tail", tail.ToString() };
         if (!string.IsNullOrEmpty(service))
             args.Add(service);
 
-        return RunProjectCommandAsync(project, args, cancellationToken);
+        return RunProjectCommandAsync(project, args, cancellationToken, hostId);
     }
 
     private static List<string> Compose(string verb, string? service)
@@ -486,7 +571,8 @@ public class ComposeService
     private async Task<ComposeCommandResult> RunProjectCommandAsync(
         string project,
         List<string> verbArgs,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? preferredHostId = null)
     {
         if (!IsValidProjectName(project))
             return Fail("非法的项目名");
@@ -494,10 +580,13 @@ public class ComposeService
         var managedDir = ProjectDir(project);
         var managedFile = ResolveComposeFile(managedDir);
 
-        if (managedFile != null)
-        {
-            var hostId = ReadHostBinding(managedDir) ?? _dockerService.GetDefaultHost()?.Id;
+        var managedHostId = managedFile == null
+            ? null
+            : ReadHostBinding(managedDir) ?? _dockerService.GetDefaultHost()?.Id;
 
+        if (managedFile != null
+            && (string.IsNullOrEmpty(preferredHostId) || managedHostId == preferredHostId))
+        {
             var args = new List<string>
             {
                 "-f", managedFile,
@@ -506,13 +595,13 @@ public class ComposeService
             };
             args.AddRange(verbArgs);
 
-            return await RunComposeAsync(hostId, managedDir, args, cancellationToken);
+            return await RunComposeAsync(managedHostId, managedDir, args, cancellationToken);
         }
 
-        // Externally-managed stack: address it by project name. Compose can act on a
-        // running project without its file for lifecycle verbs, which covers the
-        // common case of adopting a stack the panel did not create.
-        var discovered = await GetProjectAsync(project, cancellationToken);
+        var discovered = await GetProjectAsync(
+            project,
+            preferredHostId,
+            cancellationToken);
         if (discovered == null)
             return Fail("项目不存在");
 
@@ -522,12 +611,123 @@ public class ComposeService
         {
             externalArgs.Insert(0, discovered.ConfigFile);
             externalArgs.Insert(0, "-f");
+            externalArgs.AddRange(verbArgs);
+            var workDir = Directory.Exists(discovered.WorkingDir) ? discovered.WorkingDir : null;
+            return await RunComposeAsync(discovered.HostId, workDir, externalArgs, cancellationToken);
         }
 
-        externalArgs.AddRange(verbArgs);
+        return await RunExternalProjectOperationAsync(discovered, verbArgs, cancellationToken);
+    }
 
-        var workDir = Directory.Exists(discovered.WorkingDir) ? discovered.WorkingDir : null;
-        return await RunComposeAsync(discovered.HostId, workDir, externalArgs, cancellationToken);
+    /// <summary>
+    /// A compose file path reported by Docker labels usually belongs to the host
+    /// and is not mounted into the panel container. Existing external containers
+    /// are therefore managed directly through the Docker API instead of invoking
+    /// a compose command that would always fail with “no configuration file”.
+    /// </summary>
+    private async Task<ComposeCommandResult> RunExternalProjectOperationAsync(
+        ComposeProject project,
+        IReadOnlyList<string> args,
+        CancellationToken cancellationToken)
+    {
+        var verb = args.FirstOrDefault() ?? string.Empty;
+        var service = verb switch
+        {
+            "start" or "stop" or "restart" or "pull" => args.Skip(1).FirstOrDefault(),
+            "logs" when args.Count > 4 => args[^1],
+            _ => null
+        };
+
+        var targets = string.IsNullOrWhiteSpace(service)
+            ? project.Services
+            : project.Services.Where(s => s.Name == service).ToList();
+
+        if (targets.Count == 0)
+            return Fail(string.IsNullOrWhiteSpace(service) ? "外部应用栈没有现有容器" : $"服务 {service} 不存在");
+
+        if (verb == "config")
+            return Fail("外部应用栈的 compose 文件未挂载到面板，无法显示合并配置");
+
+        if (verb == "logs")
+        {
+            var output = new StringBuilder();
+            var tailIndex = args.ToList().FindIndex(x => x == "--tail");
+            var tail = tailIndex >= 0 && tailIndex + 1 < args.Count
+                && int.TryParse(args[tailIndex + 1], out var parsedTail)
+                    ? parsedTail
+                    : 200;
+
+            foreach (var target in targets)
+            {
+                var entries = await _dockerService.GetContainerLogsAsync(
+                    target.ContainerId,
+                    project.HostId,
+                    tail,
+                    cancellationToken);
+                foreach (var entry in entries)
+                    output.AppendLine($"[{target.Name}] {entry.Timestamp:O} {entry.Stream}: {entry.Message}");
+            }
+
+            return new ComposeCommandResult { Success = true, Output = output.ToString().TrimEnd() };
+        }
+
+        var succeeded = 0;
+        foreach (var target in targets)
+        {
+            bool ok;
+            switch (verb)
+            {
+                case "up":
+                case "start":
+                    if (verb == "up" && args.Contains("--pull"))
+                        await PullExternalImageAsync(target.Image, project.HostId, cancellationToken);
+                    ok = await _dockerService.StartContainerAsync(target.ContainerId, project.HostId, cancellationToken);
+                    break;
+                case "down":
+                case "stop":
+                    ok = await _dockerService.StopContainerAsync(target.ContainerId, project.HostId, cancellationToken);
+                    break;
+                case "restart":
+                    ok = await _dockerService.RestartContainerAsync(target.ContainerId, project.HostId, cancellationToken);
+                    break;
+                case "pull":
+                    ok = await PullExternalImageAsync(target.Image, project.HostId, cancellationToken);
+                    break;
+                default:
+                    return Fail($"外部应用栈不支持操作: {verb}");
+            }
+
+            if (ok)
+                succeeded++;
+        }
+
+        var success = succeeded == targets.Count;
+        var action = verb is "down" or "stop" ? "停止" : verb is "pull" ? "拉取镜像" : verb is "restart" ? "重启" : "启动";
+        return new ComposeCommandResult
+        {
+            Success = success,
+            ExitCode = success ? 0 : -1,
+            Output = $"已通过 Docker API {action} {succeeded}/{targets.Count} 个外部应用栈容器"
+        };
+    }
+
+    private async Task<bool> PullExternalImageAsync(
+        string image,
+        string hostId,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(image))
+            return false;
+
+        if (image.Contains('@'))
+            return await _dockerService.PullImageAsync(image, string.Empty, hostId, cancellationToken);
+
+        var lastSlash = image.LastIndexOf('/');
+        var lastColon = image.LastIndexOf(':');
+        var hasTag = lastColon > lastSlash;
+        var repository = hasTag ? image[..lastColon] : image;
+        var tag = hasTag ? image[(lastColon + 1)..] : "latest";
+        return await _dockerService.PullImageAsync(repository, tag, hostId, cancellationToken);
     }
 
     #endregion

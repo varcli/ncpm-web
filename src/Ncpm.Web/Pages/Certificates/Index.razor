@@ -2,6 +2,7 @@
 @using Microsoft.AspNetCore.Authorization
 @using Ncpm.Data
 @using Ncpm.Services
+@using System.Security.Cryptography.X509Certificates
 @attribute [Authorize]
 @inject Ncpm.Services.ConfigService ConfigService
 @inject AcmeService AcmeService
@@ -9,7 +10,7 @@
 
 <PageHeader Title="SSL 证书" Subtitle="管理 SSL 证书">
     <PageHeaderExtra>
-        <Button Type="@ButtonType.Primary" Icon="@IconType.Outline.Plus" OnClick="OpenUpload">上传证书</Button>
+        <Button Type="@ButtonType.Primary" Icon="@IconType.Outline.Plus" OnClick="OpenUpload">导入证书</Button>
         <Button Icon="@IconType.Outline.SafetyCertificate" OnClick="OpenAcme">ACME 自动申请</Button>
     </PageHeaderExtra>
 </PageHeader>
@@ -60,7 +61,7 @@
 </Table>
 
 @* Upload Modal *@
-<Modal Title="上传证书" @bind-Visible="@_uploadVisible" OnOk="SaveUpload" OnCancel="CloseUpload">
+<Modal Title="导入容器内证书" @bind-Visible="@_uploadVisible" OnOk="SaveUpload" OnCancel="CloseUpload">
     <Form Model="@_uploadCert" Layout="@FormLayout.Vertical">
         <FormItem Label="域名" Required>
             <Input @bind-Value="@_uploadCert.Domain" Placeholder="example.com" />
@@ -87,10 +88,22 @@
             <Select @bind-Value="@_acmeConfig.Challenge" TItem="AcmeChallengeType" TItemValue="AcmeChallengeType">
                 <SelectOptions>
                     <SelectOption TItem="AcmeChallengeType" TItemValue="AcmeChallengeType" Value="@AcmeChallengeType.Http01" Label="HTTP-01（需80端口）" />
-                    <SelectOption TItem="AcmeChallengeType" TItemValue="AcmeChallengeType" Value="@AcmeChallengeType.Dns01" Label="DNS-01（需DNS API）" />
+                    <SelectOption TItem="AcmeChallengeType" TItemValue="AcmeChallengeType" Value="@AcmeChallengeType.Dns01" Label="DNS-01（支持通配符与自动续期）" />
                 </SelectOptions>
             </Select>
         </FormItem>
+        @if (_acmeConfig.Challenge == AcmeChallengeType.Http01)
+        {
+            <Alert Type="@AlertType.Info" ShowIcon="true" Style="margin-bottom: 16px;"
+                   Message="HTTP-01 自动签发"
+                   Description="域名必须解析到本机，且公网 80 端口可访问。通配符证书请选择 DNS-01。" />
+        }
+        else
+        {
+            <Alert Type="@AlertType.Info" ShowIcon="true" Style="margin-bottom: 16px;"
+                   Message="DNS-01 自动签发"
+                   Description="NCPM 会通过 DNS API 自动创建和清理 TXT 记录，支持 *.example.com，并保存凭据用于无人值守续期。建议使用仅有 DNS 编辑权限的最小权限令牌。" />
+        }
         @if (_acmeConfig.Challenge == AcmeChallengeType.Dns01)
         {
             <FormItem Label="DNS 提供商">
@@ -108,21 +121,31 @@
                 var provider = AcmeService.GetDnsProviders().FirstOrDefault(p => p.Name == _acmeConfig.DnsProvider);
                 if (provider != null)
                 {
-                    @foreach (var field in provider.RequiredFields)
+                    @foreach (var field in provider.Fields)
                     {
-                        <FormItem Label="@field">
-                            <InputPassword @bind-Value="@_dnsCredentials[field]" />
+                        <FormItem Label="@field.DisplayName">
+                            @if (field.Secret)
+                            {
+                                <InputPassword @bind-Value="@_dnsCredentials[CredentialKey(provider.Name, field.Name)]" Placeholder="@field.Placeholder" />
+                            }
+                            else
+                            {
+                                <Input @bind-Value="@_dnsCredentials[CredentialKey(provider.Name, field.Name)]" Placeholder="@field.Placeholder" />
+                            }
                         </FormItem>
                     }
                 }
             }
+            <FormItem Label="DNS 传播等待（秒）">
+                <AntDesign.InputNumber @bind-Value="@_acmeConfig.DnsPropagationSeconds" Min="0" Max="3600" />
+                <div style="color: rgba(255,255,255,.45); margin-top: 4px;">0 表示由提供商适配器自动检测；DNS 生效较慢时可设置固定等待时间。</div>
+            </FormItem>
         }
         <FormItem Label="CA 服务器">
             <Select @bind-Value="@_acmeConfig.CaDirUrl" TItem="string" TItemValue="string">
                 <SelectOptions>
                     <SelectOption TItem="string" TItemValue="string" Value="@("https://acme-v02.api.letsencrypt.org/directory")" Label="Let's Encrypt (生产)" />
                     <SelectOption TItem="string" TItemValue="string" Value="@("https://acme-staging-v02.api.letsencrypt.org/directory")" Label="Let's Encrypt (测试)" />
-                    <SelectOption TItem="string" TItemValue="string" Value="@("https://acme.zerossl.com/v2/DV90")" Label="ZeroSSL" />
                 </SelectOptions>
             </Select>
         </FormItem>
@@ -131,8 +154,7 @@
                 <SelectOptions>
                     <SelectOption TItem="string" TItemValue="string" Value="@("EC256")" Label="ECDSA P-256 (推荐)" />
                     <SelectOption TItem="string" TItemValue="string" Value="@("EC384")" Label="ECDSA P-384" />
-                    <SelectOption TItem="string" TItemValue="string" Value="@("RS2048")" Label="RSA 2048" />
-                    <SelectOption TItem="string" TItemValue="string" Value="@("RS4096")" Label="RSA 4096" />
+                    <SelectOption TItem="string" TItemValue="string" Value="@("RS256")" Label="RSA 2048" />
                 </SelectOptions>
             </Select>
         </FormItem>
@@ -181,18 +203,38 @@
 
     private void SaveUpload()
     {
-        if (string.IsNullOrEmpty(_uploadCert.Domain))
+        if (string.IsNullOrWhiteSpace(_uploadCert.Domain)
+            || string.IsNullOrWhiteSpace(_uploadCert.CertPath)
+            || string.IsNullOrWhiteSpace(_uploadCert.KeyPath))
         {
-            Message.Warning("请输入域名");
+            Message.Warning("请填写域名、证书路径和私钥路径");
             return;
         }
 
-        _uploadCert.NotBefore = DateTime.UtcNow;
-        _uploadCert.NotAfter = DateTime.UtcNow.AddDays(365);
+        if (!File.Exists(_uploadCert.CertPath) || !File.Exists(_uploadCert.KeyPath))
+        {
+            Message.Error("证书或私钥文件不存在；路径必须是面板容器内可访问的路径");
+            return;
+        }
+
+        try
+        {
+            using var parsed = X509Certificate2.CreateFromPemFile(_uploadCert.CertPath);
+            _uploadCert.Issuer = parsed.GetNameInfo(X509NameType.SimpleName, forIssuer: true);
+            _uploadCert.NotBefore = parsed.NotBefore.ToUniversalTime();
+            _uploadCert.NotAfter = parsed.NotAfter.ToUniversalTime();
+            _uploadCert.Domains = [_uploadCert.Domain];
+        }
+        catch (Exception ex)
+        {
+            Message.Error($"证书解析失败: {ex.Message}");
+            return;
+        }
+
         _certificates.Add(_uploadCert);
         ConfigService.SaveCertificates(_certificates);
         _uploadVisible = false;
-        Message.Success("证书已上传");
+        Message.Success("证书已导入");
     }
 
     // ACME
@@ -205,7 +247,9 @@
             CertificateKeyType = "EC256"
         };
         _acmeDomainsText = string.Empty;
-        _dnsCredentials = new();
+        _dnsCredentials = AcmeService.GetDnsProviders()
+            .SelectMany(provider => provider.Fields.Select(field => CredentialKey(provider.Name, field.Name)))
+            .ToDictionary(name => name, _ => string.Empty, StringComparer.Ordinal);
         _acmeVisible = true;
     }
 
@@ -220,7 +264,25 @@
         }
 
         _acmeConfig.Domains = _acmeDomainsText.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
-        _acmeConfig.DnsCredentials = _dnsCredentials;
+        if (_acmeConfig.Challenge == AcmeChallengeType.Dns01)
+        {
+            var provider = AcmeService.GetDnsProviders()
+                .FirstOrDefault(item => item.Name == _acmeConfig.DnsProvider);
+            if (provider == null)
+            {
+                Message.Warning("请选择 DNS 提供商");
+                return;
+            }
+
+            _acmeConfig.DnsCredentials = provider.Fields.ToDictionary(
+                field => field.Name,
+                field => _dnsCredentials[CredentialKey(provider.Name, field.Name)],
+                StringComparer.Ordinal);
+        }
+        else
+        {
+            _acmeConfig.DnsCredentials = new();
+        }
 
         Message.Loading("正在申请证书...");
         var success = await AcmeService.IssueCertificateAsync(_acmeConfig);
@@ -233,7 +295,7 @@
         }
         else
         {
-            Message.Error("证书申请失败，请检查日志");
+            Message.Error($"证书申请失败: {AcmeService.LastError ?? "请检查日志"}");
         }
     }
 
@@ -249,15 +311,18 @@
         }
         else
         {
-            Message.Error("证书续期失败");
+            Message.Error($"证书续期失败: {AcmeService.LastError ?? "请检查日志"}");
         }
     }
 
     // Delete
     private void DeleteCertificate(CertificateConfig cert)
     {
+        AcmeService.DeleteCertificateSecrets(cert);
         _certificates.Remove(cert);
         ConfigService.SaveCertificates(_certificates);
         Message.Success("证书已删除");
     }
+
+    private static string CredentialKey(string provider, string field) => $"{provider}:{field}";
 }

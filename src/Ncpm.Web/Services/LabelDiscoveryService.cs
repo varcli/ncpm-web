@@ -58,7 +58,7 @@ public class LabelDiscoveryService : IDisposable
     private readonly string _discoveredPath;
     private readonly object _sync = new();
     private Timer? _sweepTimer;
-    private Timer? _eventReconnectTimer;
+    private int _sweeping;
     private bool _disposed;
 
     // Names of manual host domains, to flag discovered hosts that collide.
@@ -92,15 +92,22 @@ public class LabelDiscoveryService : IDisposable
         // then on a 60s cadence as a backstop for the event stream.
         _sweepTimer = new Timer(async void (_) =>
         {
-            try { await SweepAsync(); }
-            catch (Exception ex) { _logger.LogError(ex, "Discovery sweep failed"); }
-        }, null, TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(60));
+            if (Interlocked.CompareExchange(ref _sweeping, 1, 0) != 0)
+                return;
 
-        _eventReconnectTimer = new Timer(async void (_) =>
-        {
-            try { await EnsureEventStreamAsync(); }
-            catch (Exception ex) { _logger.LogError(ex, "Discovery event stream watchdog failed"); }
-        }, null, TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(30));
+            try
+            {
+                await SweepAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Discovery sweep failed");
+            }
+            finally
+            {
+                Volatile.Write(ref _sweeping, 0);
+            }
+        }, null, TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(60));
     }
 
     #region Sweep
@@ -144,9 +151,20 @@ public class LabelDiscoveryService : IDisposable
 
             foreach (var alias in ResolveAliases(labels))
             {
-                var discovered = await BuildHostFromLabels(container, alias);
-                if (discovered != null)
-                    desired[discovered.HostId] = discovered;
+                try
+                {
+                    var discovered = await BuildHostFromLabels(container, alias);
+                    if (discovered != null)
+                        desired[discovered.HostId] = discovered;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Skipping unreachable discovered route for {Container} ({Alias})",
+                        container.Name,
+                        alias ?? "default");
+                }
             }
         }
 
@@ -310,14 +328,13 @@ public class LabelDiscoveryService : IDisposable
 
             if (selected != null)
             {
-                // Prefer the container name: Docker's embedded DNS resolves it on
-                // any user-defined network, and unlike the IP it survives a restart.
-                var target = !string.IsNullOrEmpty(container.Name)
-                    ? container.Name
-                    : selected.Value.Endpoint.IPAddress;
-
-                if (!string.IsNullOrEmpty(target))
-                    return Format(scheme, target, port);
+                // Docker DNS resolves the container name only after the panel is
+                // attached to the same user-defined network. Do that explicitly
+                // for the local daemon; remote daemons fall back to a published port.
+                var connected = await _dockerService.EnsurePanelConnectedToNetworkAsync(
+                    container.HostId, selected.Value.Name);
+                if (connected && !string.IsNullOrEmpty(container.Name))
+                    return Format(scheme, container.Name, port);
             }
             else if (!string.IsNullOrWhiteSpace(requested))
             {
@@ -333,11 +350,14 @@ public class LabelDiscoveryService : IDisposable
             .FirstOrDefault(p => p.PrivatePort.ToString() == port && p.PublicPort.HasValue);
 
         if (published?.PublicPort is int publicPort)
-            return Format(scheme, "host.docker.internal", publicPort.ToString());
+            return Format(
+                scheme,
+                _dockerService.GetReachableHostAddress(container.HostId),
+                publicPort.ToString());
 
-        // Last resort: the bare container name. nginx fails loudly if it cannot
-        // resolve it, which beats silently proxying nowhere.
-        return Format(scheme, container.Name, port);
+        throw new InvalidOperationException(
+            $"Container {container.Name} is not reachable: attach the panel to a shared network " +
+            $"or publish container port {port}");
     }
 
     /// <summary>
@@ -489,8 +509,13 @@ public class LabelDiscoveryService : IDisposable
                 {
                     var content = await File.ReadAllTextAsync(file, cancellationToken);
                     var host = _configService.DeserializeProxyHost(content);
-                    if (host != null)
-                        _nginxService.DeleteConfig(host.Id);
+                    if (host != null && !await _nginxService.DeleteConfigAsync(host.Id, cancellationToken))
+                    {
+                        _logger.LogWarning(
+                            "Could not deactivate discovered host {Id}: {Error}",
+                            host.Id, _nginxService.LastError);
+                        continue;
+                    }
                     File.Delete(file);
                     _logger.LogInformation("Removed discovered host {Id} (no longer declared)", id);
                 }
@@ -593,8 +618,10 @@ public class LabelDiscoveryService : IDisposable
             : hostId;
 
         _configService.SaveProxyHost(config);
-        _nginxService.DeleteConfig(hostId); // remove the auto- config from nginx
-        await _nginxService.PublishConfigAsync(config, cancellationToken);
+        if (!await _nginxService.PublishConfigAsync(config, cancellationToken))
+            return false;
+        if (!await _nginxService.DeleteConfigAsync(hostId, cancellationToken))
+            return false;
 
         File.Delete(sourcePath);
 
@@ -608,26 +635,11 @@ public class LabelDiscoveryService : IDisposable
 
     #endregion
 
-    /// <summary>
-    /// Originally tried to subscribe to the Docker event stream for sub-second
-    /// label updates, but the <c>DockerSystemEventsStream</c> API differs across
-    /// Docker.DotNet versions and the typed client's <c>MonitorEventsAsync</c>
-    /// surface is brittle. The 60s sweep timer (see <see cref="Start"/>) already
-    /// reconciles state on a fixed cadence, which is responsive enough for a
-    /// control panel, so the event stream is intentionally left as a no-op
-    /// rather than depending on an unstable API.
-    /// </summary>
-    private Task EnsureEventStreamAsync()
-    {
-        return Task.CompletedTask;
-    }
-
     public void Dispose()
     {
         if (!_disposed)
         {
             _sweepTimer?.Dispose();
-            _eventReconnectTimer?.Dispose();
             _disposed = true;
         }
     }

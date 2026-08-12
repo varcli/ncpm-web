@@ -32,6 +32,16 @@
                 <FormItem Label="基础路径">
                     <Input @bind-Value="@_config.Panel.BasePath" />
                 </FormItem>
+                <FormItem Label="可信反向代理（每行一个 IP 或 CIDR）">
+                    <TextArea Rows="4" @bind-Value="@_trustedProxiesText"
+                              Placeholder="172.18.0.1&#10;10.0.0.0/24" />
+                </FormItem>
+                <FormItem Label="最大代理层数">
+                    <AntDesign.InputNumber @bind-Value="@_config.Panel.ForwardedHeaderLimit" Min="1" Max="10" Style="width: 100%" />
+                </FormItem>
+                <Alert Type="@AlertType.Warning" ShowIcon="true"
+                       Message="可信代理配置需要重启"
+                       Description="只填写实际连接到面板的代理 IP/网段。面板只会接受这些来源发送的 X-Forwarded-For/Proto，避免客户端伪造来源 IP 绕过 ACL 和限流。" />
             </Form>
         </Card>
     </TabPane>
@@ -253,9 +263,12 @@
 
     <TabPane Key="6" Tab="OIDC">
         <Card Title="OpenID Connect 认证">
+            <Alert Type="@AlertType.Warning" ShowIcon="true" Style="margin-bottom: 16px;"
+                   Message="OIDC 暂未接入认证链路"
+                   Description="此页仅保留配置草稿，当前版本不会使用 OIDC 登录。生产环境请保持关闭并使用本地管理员认证。" />
             <Form Model="@_oidcConfig" Layout="@FormLayout.Vertical">
-                <FormItem Label="启用 OIDC">
-                    <Switch @bind-Value="@_oidcConfig.Enabled" />
+                <FormItem Label="启用 OIDC（暂不可用）">
+                    <Switch @bind-Value="@_oidcConfig.Enabled" Disabled="true" />
                 </FormItem>
                 <FormItem Label="颁发者地址 (Authority)">
                     <Input @bind-Value="@_oidcConfig.Authority" Placeholder="https://accounts.google.com" />
@@ -353,7 +366,13 @@
 
     <TabPane Key="8" Tab="原始配置">
         <Card Title="原始配置 (YAML)">
+            <Alert Type="@AlertType.Warning" ShowIcon="true" Style="margin-bottom: 12px;"
+                   Message="原始 YAML 独立应用"
+                   Description="编辑完成后请点击下方“校验并应用 YAML”。顶部“保存更改”只保存表单中的字段。" />
             <TextArea Rows="20" @bind-Value="@_rawConfig" />
+            <Button Type="@ButtonType.Primary" OnClick="ApplyRawConfig" Style="margin-top: 12px;">
+                校验并应用 YAML
+            </Button>
         </Card>
     </TabPane>
 </Tabs>
@@ -365,6 +384,7 @@
     private string _scopesText = "openid,profile,email";
     private string _allowedUsersText = "";
     private string _allowedGroupsText = "";
+    private string _trustedProxiesText = "";
 
     protected override void OnInitialized()
     {
@@ -373,20 +393,21 @@
 
     private void LoadConfig()
     {
-        _config = ConfigService.LoadAppConfig();
+        // The service cache is shared by request-time readers. Edit a detached
+        // snapshot so unsaved form changes never leak into live behavior.
+        _config = ConfigService.ParseAppConfig(
+            ConfigService.SerializeAppConfig(ConfigService.LoadAppConfig()));
         _oidcConfig = _config.Oidc ?? new OidcConfig();
         _scopesText = string.Join(",", _oidcConfig.Scopes);
         _allowedUsersText = string.Join(",", _oidcConfig.AllowedUsers);
         _allowedGroupsText = string.Join(",", _oidcConfig.AllowedGroups);
+        _trustedProxiesText = string.Join(Environment.NewLine, _config.Panel.TrustedProxies);
         UpdateRawConfig();
     }
 
     private void UpdateRawConfig()
     {
-        var serializer = new YamlDotNet.Serialization.SerializerBuilder()
-            .WithNamingConvention(YamlDotNet.Serialization.NamingConventions.CamelCaseNamingConvention.Instance)
-            .Build();
-        _rawConfig = serializer.Serialize(_config);
+        _rawConfig = ConfigService.SerializeAppConfig(_config);
     }
 
     private void SaveConfig()
@@ -398,13 +419,33 @@
             _oidcConfig.AllowedUsers = _allowedUsersText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
             _oidcConfig.AllowedGroups = _allowedGroupsText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
             _config.Oidc = _oidcConfig;
+            _config.Panel.TrustedProxies = _trustedProxiesText
+                .Split(['\r', '\n', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
 
             ConfigService.SaveAppConfig(_config);
-            Message.Success("配置保存成功");
+            UpdateRawConfig();
+            Message.Success("配置保存成功；监听地址、基础路径和日志输出变更将在重启后生效");
         }
         catch (Exception ex)
         {
             Message.Error($"保存配置失败: {ex.Message}");
+        }
+    }
+
+    private void ApplyRawConfig()
+    {
+        try
+        {
+            var parsed = ConfigService.ParseAppConfig(_rawConfig);
+            ConfigService.SaveAppConfig(parsed);
+            LoadConfig();
+            Message.Success("YAML 校验通过并已应用；启动相关设置将在重启后生效");
+        }
+        catch (Exception ex)
+        {
+            Message.Error($"YAML 未应用: {ex.Message}");
         }
     }
 

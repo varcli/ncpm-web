@@ -130,23 +130,14 @@
 
     private async Task Restore(NginxSnapshot snapshot)
     {
-        if (await SnapshotService.RestoreAsync(snapshot.Id))
+        if (await SnapshotService.RestoreAndReloadAsync(snapshot.Id, NginxService))
         {
-            // Validate the restored tree before committing with a reload.
-            if (await NginxService.ValidateConfigAsync())
-            {
-                await NginxService.ReloadAsync();
-                Message.Success($"已回滚到快照 {snapshot.Id} 并 reload");
-                await Load();
-            }
-            else
-            {
-                Message.Error($"回滚后校验失败：{NginxService.LastError}。请检查快照文件或手动修复。");
-            }
+            Message.Success($"已回滚到快照 {snapshot.Id} 并 reload");
+            await Load();
         }
         else
         {
-            Message.Error("回滚失败，请查看日志");
+            Message.Error($"回滚失败，已自动恢复回滚前配置: {NginxService.LastError}");
         }
     }
 

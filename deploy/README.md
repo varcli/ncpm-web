@@ -1,199 +1,84 @@
-# NCPM Docker Deployment
+# NCPM Docker 部署
 
-.NET Nginx Container & Proxy Management Panel
+镜像将 .NET 面板、Nginx、Docker CLI、Compose 插件和固定版本 acme.sh 打包在同一容器。入口先执行 `nginx -t`，再启动 Nginx 与面板。
 
-## Quick Start
-
-### 1. Prepare directory
+## 启动
 
 ```bash
-mkdir -p ncpm-data
-cd ncpm-data
-```
-
-### 2. Download files
-
-```bash
-# Download docker-compose.yml
-curl -O https://raw.githubusercontent.com/your-repo/ncpm/main/deploy/docker-compose.yml
-
-# Download environment config
-curl -O https://raw.githubusercontent.com/your-repo/ncpm/main/deploy/.env.example
-cp .env.example .env
-```
-
-### 3. Start services
-
-```bash
-docker compose up -d
-```
-
-### 4. Access panel
-
-Open browser: `http://your-server-ip:8098`
-
-Default login:
-- Username: `admin`
-- Password: `admin123`
-
-**Please change password immediately after first login!**
-
-## Directory Structure
-
-```
-ncpm-data/
-├── docker-compose.yml
-├── .env
-└── data/
-    ├── config/
-    │   ├── config.yml          # Application config
-    │   ├── docker-hosts.yml    # Docker host connections
-    │   ├── proxy-hosts/        # Proxy host configs
-    │   ├── users.yml           # User accounts
-    │   └── certificates/       # Certificate configs
-    ├── nginx/
-    │   ├── generated/          # Generated Nginx configs
-    │   └── active/             # Active Nginx configs
-    ├── certs/                  # SSL certificates
-    ├── secrets/                # Sensitive data
-    ├── logs/                   # Application logs
-    ├── audit/                  # Audit logs
-    └── backups/                # Configuration backups
-```
-
-## Configuration
-
-### Environment Variables
-
-Edit `.env` file:
-
-```bash
-# Docker host connection
-Docker__Host=unix:///var/run/docker.sock
-
-# For remote Docker
-Docker__Host=tcp://192.168.1.100:2375
-
-# Panel port
-Panel__Port=8098
-```
-
-### Add Remote Docker Host
-
-1. Access panel at `http://your-server:8098`
-2. Go to Docker > Hosts
-3. Click "Add Host"
-4. Fill in connection details:
-   - Name: My Remote Server
-   - Type: TCP or SSH
-   - Host: 192.168.1.100
-   - Port: 2375 (TCP) or 22 (SSH)
-5. Click "Test" to verify connection
-6. Click "Submit" to save
-
-## Backup & Restore
-
-### Backup
-
-```bash
-# Stop services
-docker compose down
-
-# Backup data directory
-tar -czf ncpm-backup-$(date +%Y%m%d).tar.gz data/
-
-# Start services
-docker compose up -d
-```
-
-### Restore
-
-```bash
-# Stop services
-docker compose down
-
-# Restore data directory
-tar -xzf ncpm-backup-YYYYMMDD.tar.gz
-
-# Start services
-docker compose up -d
-```
-
-## Upgrade
-
-```bash
-# Pull latest images
-docker compose pull
-
-# Restart services
-docker compose up -d
-```
-
-## Security Recommendations
-
-1. **Change default password** immediately after first login
-2. **Use Docker Socket Proxy** instead of direct socket mount
-3. **Enable HTTPS** for production use
-4. **Restrict panel access** to trusted networks
-5. **Regular backups** of configuration data
-
-## Troubleshooting
-
-### Container not starting
-
-```bash
-# Check logs
-docker compose logs ncpm-panel
-
-# Check container status
+cp deploy/.env.example .env
+docker compose up -d --build
 docker compose ps
 ```
 
-### Cannot connect to Docker
+面板地址为 `http://服务器地址:8098`。首次密码有三种来源，按优先级排列：
+
+1. `NCPM_ADMIN_PASSWORD_FILE` 指向挂载的 Docker/Kubernetes Secret；
+2. `.env` 中的 `NCPM_ADMIN_PASSWORD`；
+3. 留空后随机生成到 `/app/data/secrets/initial-admin-password`。
 
 ```bash
-# Test Docker connection
-docker exec ncpm-panel docker info
-
-# Check Docker socket permissions
-ls -la /var/run/docker.sock
+docker exec ncpm-panel cat /app/data/secrets/initial-admin-password
 ```
 
-### Nginx configuration errors
+初始化账号会强制改密，完成后该文件自动删除。不存在固定默认密码。
+
+## 日期镜像与升级
 
 ```bash
-# Check Nginx config
+NCPM_VERSION=20260813 docker compose pull
+NCPM_VERSION=20260813 docker compose up -d
+```
+
+主标签为上海时区 `yyyyMMdd`，另有 `sha-*` 标签用于精确回滚。升级前备份完整数据目录；配置与 Data Protection keys 必须一起恢复。
+
+```bash
+docker compose stop panel
+tar -czf ncpm-backup-$(date +%Y%m%d).tar.gz /opt/ncpm/data
+docker compose start panel
+```
+
+## 数据路径与 Compose
+
+在 `.env` 使用绝对路径：
+
+```dotenv
+NCPM_DATA_PATH=/opt/ncpm/data
+NCPM_COMPOSE_HOST_PATH=/opt/ncpm/data/compose
+```
+
+面板管理的 Compose YAML 使用相对 bind mount 时必须设置 `NCPM_COMPOSE_HOST_PATH`。Docker daemon 在宿主机解析路径，容器内 `/app/data/compose` 对宿主机不可见；命名卷不受影响。
+
+## 反代与证书
+
+1. 域名 A/AAAA 指向服务器，开放 80/443。
+2. 普通域名使用 HTTP-01；通配符证书必须使用 DNS-01。
+3. 首次真实签发前先选择 Let's Encrypt Staging。
+4. 发布会先校验候选配置和证书/私钥，再执行 `nginx -t` 与 reload；失败自动恢复上一版本。
+
+HTTP-01 文件位于 `/app/data/certbot`。DNS-01 支持 Cloudflare、阿里云 DNS、DNSPod、AWS Route 53、Azure DNS、DigitalOcean、GoDaddy、Namecheap、Porkbun、Linode、Vultr。DNS API 凭据使用 Data Protection 加密后保存在 `data/secrets`，不会以明文写入证书 YAML 或命令参数。
+
+TCP/UDP 代理还必须在 `docker-compose.yml` 的 `ports` 显式发布监听端口。
+
+## Docker 权限与远程节点
+
+默认挂载可读写 `/var/run/docker.sock`，这是容器/Compose 运维所必需，也等同较高宿主机权限。仅向可信管理员开放，或改接限制 API 的 Socket Proxy。
+
+远程 Docker 支持 HTTP(S)。生产环境使用 HTTPS/mTLS：在 Docker 主机页面配置 CA、客户端证书与私钥的容器内只读路径。SSH 传输当前不支持，明文 2375 不应暴露到公网。
+
+## 面板前置反代
+
+面板位于负载均衡/Nginx/Caddy 后时，在系统配置填写直接代理的 IP 或 CIDR，并重启容器。只有可信来源的 `X-Forwarded-For`、`X-Forwarded-Proto` 会生效；不要把 `0.0.0.0/0` 加入可信代理。
+
+## 运维检查
+
+```bash
+docker compose logs -f panel
 docker exec ncpm-panel nginx -t
-
-# View Nginx logs
-docker exec ncpm-panel cat /var/log/nginx/error.log
+curl -f http://127.0.0.1:8098/health/live
+curl -f http://127.0.0.1:8098/health/ready
 ```
 
-## Advanced Configuration
+- `/health/live` 只检查进程。
+- `/health/ready` 检查配置和 Nginx；Docker 不可用时为 Degraded，不会把暂时的 daemon 故障误判成面板进程崩溃。
 
-### Use Docker Socket Proxy
-
-For better security, use Docker Socket Proxy:
-
-1. Uncomment `docker-proxy` service in `docker-compose.yml`
-2. Update panel environment:
-   ```yaml
-   environment:
-     - Docker__Host=tcp://docker-proxy:2375
-   ```
-3. Remove Docker socket mount from panel service
-4. Restart services
-
-### Custom Nginx Configuration
-
-To add custom Nginx settings:
-
-1. Edit `data/config/config.yml`
-2. Update Nginx section
-3. Restart panel or wait for config reload
-
-### SSL/TLS Certificate
-
-1. Go to Certificates page
-2. Upload certificate files or configure ACME
-3. Enable HTTPS in proxy host settings
+完整验收见[上线检查清单](../docs/PRODUCTION-CHECKLIST.md)。OIDC 当前仅为配置草稿，生产环境保持关闭。

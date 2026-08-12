@@ -29,6 +29,9 @@ public class DockerHost
     // TCP settings
     public int TcpPort { get; set; } = 2375;
     public bool UseTls { get; set; }
+    public string? TlsCaCertPath { get; set; }
+    public string? TlsClientCertPath { get; set; }
+    public string? TlsClientKeyPath { get; set; }
 
     // SSH settings
     public int SshPort { get; set; } = 22;
@@ -171,6 +174,7 @@ public class ComposeProject
 
     public int ServiceCount => Services.Count;
     public int RunningCount => Services.Count(s => s.IsRunning);
+    public string Key => $"{HostId}:{Name}";
 }
 
 /// <summary>
@@ -255,7 +259,7 @@ public class HttpHostConfig
 {
     public bool RedirectToHttps { get; set; }
     public bool Websocket { get; set; }
-    public bool PreserveHost { get; set; }
+    public bool PreserveHost { get; set; } = true;
     public bool Buffering { get; set; }
     public string? BufferSize { get; set; }
     public string? ConnectTimeout { get; set; }
@@ -366,6 +370,17 @@ public class CertificateConfig
     public CertificateSource Source { get; set; }
     public DateTime CreatedAt { get; set; }
 
+    // Persist the complete ACME order inputs so unattended renewal recreates the
+    // same certificate instead of silently dropping SANs or using an empty email.
+    public List<string> Domains { get; set; } = new();
+    public string? AcmeEmail { get; set; }
+    public string? AcmeCaDirUrl { get; set; }
+    public AcmeChallengeType? AcmeChallenge { get; set; }
+    public string? CertificateKeyType { get; set; }
+    public string? DnsProvider { get; set; }
+    public string? DnsCredentialsSecretId { get; set; }
+    public int DnsPropagationSeconds { get; set; }
+
     public bool IsExpired => DateTime.UtcNow > NotAfter;
     public bool IsExpiringSoon => !IsExpired && (NotAfter - DateTime.UtcNow).TotalDays < 30;
     public int DaysUntilExpiry => Math.Max(0, (int)(NotAfter - DateTime.UtcNow).TotalDays);
@@ -380,6 +395,7 @@ public class AppConfig
     public PanelConfig Panel { get; set; } = new();
     public DockerConfig Docker { get; set; } = new();
     public NginxConfig Nginx { get; set; } = new();
+    public AcmeToolConfig Acme { get; set; } = new();
     public ComposeConfig Compose { get; set; } = new();
     public LoggingConfig Logging { get; set; } = new();
     public SecurityConfig Security { get; set; } = new();
@@ -406,6 +422,8 @@ public class PanelConfig
     public string Host { get; set; } = "0.0.0.0";
     public int Port { get; set; } = 8098;
     public string BasePath { get; set; } = "/";
+    public List<string> TrustedProxies { get; set; } = new();
+    public int ForwardedHeaderLimit { get; set; } = 1;
 }
 
 public class DockerConfig
@@ -427,6 +445,21 @@ public class NginxConfig
     public string StreamPath { get; set; } = "data/nginx/stream";
     public string CertPath { get; set; } = "data/certs";
     public string ExecutablePath { get; set; } = "nginx";
+}
+
+public class AcmeToolConfig
+{
+    /// <summary>acme.sh executable used for DNS API challenges.</summary>
+    public string ExecutablePath { get; set; } = "/opt/acme.sh/acme.sh";
+
+    /// <summary>
+    /// Optional acme.sh state directory. When empty, NCPM places it below the
+    /// protected application secrets directory.
+    /// </summary>
+    public string? HomePath { get; set; }
+
+    /// <summary>Maximum duration of one issue/install command.</summary>
+    public int CommandTimeoutSeconds { get; set; } = 900;
 }
 
 public class ComposeConfig
@@ -541,10 +574,16 @@ public class ContainerMetrics
 {
     public string ContainerId { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
+    public string HostId { get; set; } = string.Empty;
+    public string HostName { get; set; } = string.Empty;
     public double CpuUsage { get; set; }
     public long MemoryUsage { get; set; }
     public long MemoryLimit { get; set; }
     public DateTime CollectedAt { get; set; } = DateTime.UtcNow;
+
+    public double MemoryPercent => MemoryLimit > 0
+        ? (double)MemoryUsage / MemoryLimit * 100
+        : 0;
 }
 
 public class RequestMetrics
@@ -580,6 +619,7 @@ public class User
     public DateTime? LockedOutUntil { get; set; }
     public DateTime? LastLoginAt { get; set; }
     public DateTime CreatedAt { get; set; }
+    public bool MustChangePassword { get; set; }
 
     public bool IsLockedOut => LockedOutUntil.HasValue && LockedOutUntil.Value > DateTime.UtcNow;
 }
@@ -701,6 +741,7 @@ public class AcmeConfig
     public Dictionary<string, string> DnsCredentials { get; set; } = new();
     public string CaDirUrl { get; set; } = "https://acme-v02.api.letsencrypt.org/directory";
     public string CertificateKeyType { get; set; } = "EC256";
+    public int DnsPropagationSeconds { get; set; }
     public string? CertPath { get; set; }
     public string? KeyPath { get; set; }
 }
@@ -715,7 +756,18 @@ public class DnsProviderInfo
 {
     public string Name { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
-    public List<string> RequiredFields { get; set; } = new();
+    public string AcmeDnsApi { get; set; } = string.Empty;
+    public List<DnsCredentialField> Fields { get; set; } = new();
+}
+
+public class DnsCredentialField
+{
+    public string Name { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+    public string EnvironmentVariable { get; set; } = string.Empty;
+    public bool Required { get; set; } = true;
+    public bool Secret { get; set; } = true;
+    public string? Placeholder { get; set; }
 }
 
 public class AcmeChallenge

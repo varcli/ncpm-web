@@ -107,9 +107,8 @@
                             </SelectOptions>
                         </Select>
                     </FormItem>
-                    <FormItem Label="会话保持">
-                        <Switch @bind-Value="@_editHost.LoadBalance.Sticky" />
-                    </FormItem>
+                    <Alert Type="@AlertType.Info" ShowIcon="true"
+                           Message="需要客户端粘性时请选择 IP Hash 模式" />
                 }
             </TabPane>
 
@@ -211,29 +210,21 @@
                                     <Select @bind-Value="@condition.Type" TItem="RuleMatchType" TItemValue="RuleMatchType">
                                         <SelectOptions>
                                             <SelectOption TItem="RuleMatchType" TItemValue="RuleMatchType" Value="@RuleMatchType.Path" Label="路径" />
-                                            <SelectOption TItem="RuleMatchType" TItemValue="RuleMatchType" Value="@RuleMatchType.Header" Label="Header" />
-                                            <SelectOption TItem="RuleMatchType" TItemValue="RuleMatchType" Value="@RuleMatchType.Method" Label="方法" />
-                                            <SelectOption TItem="RuleMatchType" TItemValue="RuleMatchType" Value="@RuleMatchType.Host" Label="域名" />
-                                            <SelectOption TItem="RuleMatchType" TItemValue="RuleMatchType" Value="@RuleMatchType.Query" Label="Query" />
-                                            <SelectOption TItem="RuleMatchType" TItemValue="RuleMatchType" Value="@RuleMatchType.RemoteIp" Label="IP" />
                                         </SelectOptions>
                                     </Select>
                                 </AntDesign.Col>
                                 <AntDesign.Col Span="6">
                                     <Input @bind-Value="@condition.Key" Placeholder="键 (Header名等)" />
                                 </AntDesign.Col>
-                                <AntDesign.Col Span="8">
+                                <AntDesign.Col Span="12">
                                     <Input @bind-Value="@condition.Value" Placeholder="值" />
-                                </AntDesign.Col>
-                                <AntDesign.Col Span="2">
-                                    <Checkbox @bind-Value="@condition.Negate">取反</Checkbox>
                                 </AntDesign.Col>
                                 <AntDesign.Col Span="2">
                                     <Button Danger Size="@ButtonSize.Small" OnClick="@(() => rule.Conditions.Remove(condition))">×</Button>
                                 </AntDesign.Col>
                             </Row>
                         }
-                        <Button Type="@ButtonType.Dashed" Size="@ButtonSize.Small" OnClick="@(() => rule.Conditions.Add(new RuleCondition()))" Style="width: 100%;">
+                        <Button Type="@ButtonType.Dashed" Size="@ButtonSize.Small" OnClick="@(() => rule.Conditions.Add(new RuleCondition { Type = RuleMatchType.Path }))" Style="width: 100%;">
                             + 添加条件
                         </Button>
 
@@ -375,12 +366,17 @@
         }
     }
 
-    private void DeleteHost(ProxyHostConfig host)
+    private async Task DeleteHost(ProxyHostConfig host)
     {
+        if (!await NginxService.DeleteConfigAsync(host.Id))
+        {
+            Message.Error($"停用 Nginx 配置失败: {NginxService.LastError}");
+            return;
+        }
+
         ConfigService.DeleteProxyHost(host.Id);
-        NginxService.DeleteConfig(host.Id);
         _hosts.Remove(host);
-        Message.Success("代理配置已删除");
+        Message.Success("代理配置已删除并重载 Nginx");
     }
 
     private void AddRule()

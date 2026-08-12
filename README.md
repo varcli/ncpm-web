@@ -1,193 +1,110 @@
-# NCPM（.NET Nginx Container & Proxy Management Panel）
+# NCPM
 
-A lightweight container & reverse proxy management panel.
+NCPM（Nginx Container & Proxy Management Panel）是面向个人服务器、家庭实验室和小型自托管环境的单节点运维面板，核心是反向代理、自动 SSL 证书和 Docker/Compose 管理。
 
-一个轻量级的容器与反向代理管理面板。
+## 当前能力
 
-## 项目简介
+- HTTP/HTTPS、TCP、UDP 与静态文件代理，多上游负载均衡、WebSocket/SSE/gRPC、访问日志和健康检查。
+- Nginx 候选配置校验、`nginx -t`、原子发布、快照、失败回滚和热重载。
+- PEM/PFX 导入，ACME HTTP-01 与 DNS-01 签发、通配符证书、无人值守续期和失败通知。
+- DNS-01 支持 Cloudflare、阿里云 DNS、DNSPod、AWS Route 53、Azure DNS、DigitalOcean、GoDaddy、Namecheap、Porkbun、Linode 和 Vultr。
+- Docker 多主机、HTTPS/mTLS、容器/镜像/网络/卷运维、日志、指标、清理和 Compose 项目管理。
+- Docker Label 自动发现、ACL、动态限流、通知、就绪检查和日期版本 Docker 镜像。
 
-NCPM 面向个人服务器、家庭实验室和小型自托管环境，通过简洁的 Web 界面完成三类高频工作：
+当前发布目标是单节点生产使用。OIDC 仅保留配置草稿，尚未接入登录链路；生产环境使用本地管理员认证。
 
-1. **反向代理**：将域名或路径反向代理到本机、局域网或 Docker 服务
-2. **SSL 证书**：自动申请、续期和加载 HTTPS 证书
-3. **Docker 管理**：查看并执行常用的 Docker 容器运维操作
+## Docker 快速部署
 
-## 核心特性
+```bash
+git clone https://github.com/varcli/ncpm-web.git
+cd ncpm-web
+cp deploy/.env.example .env
+docker compose up -d --build
+```
 
-### 反向代理
-- 按域名匹配 HTTP/HTTPS 请求
-- 支持 WebSocket、SSE、gRPC 等流式转发
-- HTTP 自动跳转 HTTPS
-- 路由启用、停用、修改和即时生效
-- 基础访问日志
+面板地址：`http://服务器地址:8098`。
 
-### SSL 证书
-- 导入已有 PEM/PFX 证书
-- 通过 ACME（HTTP-01）自动申请和续期
-- 证书更新后无中断加载
-- 续期失败重试与面板告警
+首次启动不再使用固定默认密码。若 `.env` 未设置 `NCPM_ADMIN_PASSWORD`/`NCPM_ADMIN_PASSWORD_FILE`，读取随机生成的凭据：
 
-### Docker 管理
-- 查看容器列表、状态、镜像、端口和详情
-- 启动、停止和重启容器
-- 实时查看容器日志
-- 查看 CPU、内存、网络等实时指标
+```bash
+docker exec ncpm-panel cat /app/data/secrets/initial-admin-password
+```
+
+登录后会被强制进入“账号安全”修改密码，成功后初始化密码文件自动删除，已有会话全部撤销。
+
+生产部署和升级请阅读 [Docker 部署说明](deploy/README.md) 与[上线检查清单](docs/PRODUCTION-CHECKLIST.md)。
+
+## 镜像版本
+
+GitHub Actions 发布 `linux/amd64`、`linux/arm64` 镜像，主版本使用上海时区日期 `yyyyMMdd`，同时生成不可变 `sha-*` 标签：
+
+```bash
+NCPM_VERSION=20260813 docker compose pull
+NCPM_VERSION=20260813 docker compose up -d
+```
+
+## 数据与安全
+
+默认持久化目录是 `deploy/data`，生产环境建议在 `.env` 使用绝对路径 `NCPM_DATA_PATH=/opt/ncpm/data`。需要整体备份：
+
+```text
+data/
+├── config/       # 系统、代理、证书策略和 Docker 主机配置
+├── compose/      # 面板管理的 Compose 项目
+├── nginx/        # 生成、激活、stream 配置
+├── certs/        # 证书链与私钥
+├── certbot/      # HTTP-01 challenge
+├── secrets/      # Data Protection keys、会话摘要、ACME/DNS 凭据
+├── logs/
+├── audit/
+└── backups/
+```
+
+DNS 与通知 Token 使用持久化 Data Protection key 加密；会话只保存 SHA-256 摘要；敏感文件在 Linux 上限制为所有者访问。恢复时必须同时恢复完整 `secrets/`，否则历史加密配置无法解密。
+
+挂载 `/var/run/docker.sock` 等同授予面板较高的宿主机权限。只向可信管理员开放面板，生产环境优先使用受限 Socket Proxy；远程 Docker 使用 HTTPS/mTLS，不要暴露公网明文 2375。
+
+如果面板位于另一层反向代理后，只在“系统配置 → 可信反向代理”填写直接代理的 IP/CIDR。未列入信任的 `X-Forwarded-*` 会被忽略，防止伪造来源绕过 ACL 与限流。
+
+## 健康检查
+
+- `/health/live`：面板进程存活。
+- `/health`、`/health/ready`：配置可读且 Nginx 可达；Docker 全部不可用时报告 Degraded。
+
+Docker 镜像的 HEALTHCHECK 使用就绪检查。
+
+## 本地开发
+
+需要 .NET 10 SDK：
+
+```bash
+dotnet restore Ncpm.slnx
+dotnet test Ncpm.slnx -c Release --no-restore
+dotnet run --project src/Ncpm.Web/Ncpm.Web.csproj
+```
+
+本地没有 Nginx 或 Docker 时，Web 项目仍可编译和开发，但就绪检查不会显示 Healthy。
+
+开发约束见 [AGENTS.md](AGENTS.md)，贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 技术栈
 
-- **后端**：.NET 10 / ASP.NET Core
-- **前端**：Blazor Server + Ant Design Blazor + ProLayout
-- **代理**：Nginx
-- **容器**：Docker.DotNet
-- **配置**：YamlDotNet（YAML 配置文件）
-
-## 快速开始
-
-### 环境要求
-
-- .NET 10 SDK（开发环境）
-- Docker 和 Docker Compose（部署环境）
-
-### 本地开发
-
-```bash
-# 克隆项目
-git clone <repository-url>
-cd n-panel
-
-# 运行项目
-cd src/Ncpm.Web
-dotnet run
-```
-
-访问 `http://localhost:8098` 即可打开管理面板。
-
-### Docker 部署
-
-```bash
-# 克隆项目
-git clone <repository-url>
-cd ncpm
-
-# 启动服务
-docker-compose up -d
-```
-
-访问 `http://your-server-ip:8098` 即可打开管理面板。
-
-默认登录信息：
-- 用户名：`admin`
-- 密码：`admin123`
-
-**请首次登录后立即修改密码！**
+- .NET 10 / ASP.NET Core / Blazor Server
+- Ant Design Blazor / ProLayout
+- Nginx
+- Docker.DotNet + Docker Compose CLI
+- YamlDotNet / Serilog / Certes / acme.sh
 
 ## 项目结构
 
+```text
+src/Ncpm.Web/             应用与 WebUI
+tests/Ncpm.Web.Tests/     核心安全和配置测试
+deploy/                   Dockerfile、Nginx 与部署说明
+.github/workflows/        CI 与多架构镜像发布
+docs/                     上线与运维文档
 ```
-n-panel/
-├── src/
-│   └── Ncpm.Web/              # 应用源代码
-│       ├── Services/          # 业务服务层
-│       │   ├── AuthService.cs
-│       │   ├── ConfigService.cs
-│       │   ├── DockerService.cs
-│       │   ├── NginxService.cs
-│       │   └── ...
-│       ├── Pages/             # Blazor 页面
-│       │   ├── Dashboard.razor
-│       │   ├── Proxy/
-│       │   ├── Docker/
-│       │   ├── Certificates/
-│       │   └── Settings/
-│       ├── Layouts/           # 布局组件
-│       └── wwwroot/           # 静态资源
-├── deploy/
-│   ├── Dockerfile
-│   ├── nginx.conf             # Nginx 主配置
-│   ├── default.conf           # Nginx 默认站点配置
-│   └── data/                  # 持久化数据目录
-├── docker-compose.yml
-├── Ncpm.slnx                  # 解决方案文件
-└── README.md
-```
-
-## 配置说明
-
-### 应用配置
-
-编辑 `src/Ncpm.Web/appsettings.json`：
-
-```json
-{
-  "Docker": {
-    "Host": "unix:///var/run/docker.sock"
-  },
-  "Nginx": {
-    "ConfigPath": "/etc/nginx",
-    "GeneratedPath": "/app/data/nginx/generated",
-    "ActivePath": "/app/data/nginx/active"
-  },
-  "Logging": {
-    "Level": "Information",
-    "Path": "/app/data/logs"
-  }
-}
-```
-
-### 数据目录
-
-所有持久化数据存储在 `deploy/data/` 目录：
-
-```
-data/
-├── config/            # 应用配置文件
-│   ├── proxy-hosts/   # 代理主机配置
-│   └── certificates/  # 证书策略配置
-├── nginx/
-│   ├── generated/     # 生成的 Nginx 配置
-│   └── active/        # 活跃的 Nginx 配置
-├── certs/             # SSL 证书文件
-├── certbot/           # ACME challenge 文件
-├── secrets/           # 敏感信息
-├── logs/              # 应用日志
-├── audit/             # 审计日志
-└── backups/           # 配置备份
-```
-
-## 安全建议
-
-1. **修改默认密码**：首次登录后立即修改管理员密码
-2. **使用 Docker Socket Proxy**：生产环境建议使用受限的 Docker Socket Proxy
-3. **启用 HTTPS**：为管理面板配置 SSL 证书
-4. **限制访问**：仅允许受信任的网络访问管理端口
-5. **定期备份**：定期备份 `data/` 目录
-
-## 开发路线
-
-### Phase 0：技术原型 ✅
-- 建立 .NET 10 解决方案
-- 验证 Blazor + AntDesign 骨架
-- 验证 Docker 和 Nginx 集成
-
-### Phase 1：MVP（进行中）
-- 首次启动、管理员登录和系统设置
-- 代理主机 CRUD、配置校验、发布与回滚
-- 手动证书导入与 HTTP-01 自动证书
-- 容器列表、详情、启停、重启、日志和指标
-
-### Phase 2：增强
-- Docker Label 自动发现路由
-- DNS-01、泛域名和多证书
-- 多上游、健康检查和负载均衡
-- 远程 Docker 节点
 
 ## 许可证
 
-待定
-
-## 参考资料
-
-- [Nginx 反向代理模块](https://nginx.org/en/docs/http/ngx_http_proxy_module.html)
-- [Docker Compose 文档](https://docs.docker.com/compose/)
-- [Docker daemon socket 安全建议](https://docs.docker.com/engine/security/protect-access/)
-- [Let's Encrypt Challenge Types](https://letsencrypt.org/docs/challenge-types/)
+待定。

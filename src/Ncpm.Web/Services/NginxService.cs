@@ -7,11 +7,17 @@ namespace Ncpm.Services;
 public class NginxService
 {
     private readonly ConfigService _configService;
+    private readonly NginxSnapshotService _snapshotService;
     private readonly ILogger<NginxService> _logger;
+    private readonly SemaphoreSlim _rawEditLock = new(1, 1);
 
-    public NginxService(ConfigService configService, ILogger<NginxService> logger)
+    public NginxService(
+        ConfigService configService,
+        NginxSnapshotService snapshotService,
+        ILogger<NginxService> logger)
     {
         _configService = configService;
+        _snapshotService = snapshotService;
         _logger = logger;
     }
 
@@ -58,7 +64,7 @@ public class NginxService
 
     public async Task<bool> ValidateConfigAsync(CancellationToken cancellationToken = default)
     {
-        var (exitCode, output) = await RunNginxAsync("-t", cancellationToken);
+        var (exitCode, output) = await RunNginxAsync(["-t"], cancellationToken);
 
         if (exitCode != 0)
         {
@@ -73,7 +79,7 @@ public class NginxService
 
     public async Task<bool> ReloadAsync(CancellationToken cancellationToken = default)
     {
-        var (exitCode, output) = await RunNginxAsync("-s reload", cancellationToken);
+        var (exitCode, output) = await RunNginxAsync(["-s", "reload"], cancellationToken);
 
         if (exitCode != 0)
         {
@@ -88,23 +94,30 @@ public class NginxService
 
     /// <summary>Runs the nginx binary and returns its exit code plus stderr text.</summary>
     private async Task<(int ExitCode, string Output)> RunNginxAsync(
-        string arguments,
+        IReadOnlyList<string> arguments,
         CancellationToken cancellationToken)
     {
         try
         {
-            using var process = new Process
+            var startInfo = new ProcessStartInfo
             {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = NginxExecutable,
-                    Arguments = arguments,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                }
+                FileName = NginxExecutable,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
             };
+
+            foreach (var argument in arguments)
+                startInfo.ArgumentList.Add(argument);
+
+            var configFile = Path.Combine(
+                _configService.LoadAppConfig().Nginx.ConfigPath,
+                "nginx.conf");
+            startInfo.ArgumentList.Add("-c");
+            startInfo.ArgumentList.Add(configFile);
+
+            using var process = new Process { StartInfo = startInfo };
 
             process.Start();
 
@@ -122,7 +135,7 @@ public class NginxService
         catch (Exception ex)
         {
             LastError = ex.Message;
-            _logger.LogError(ex, "Failed to run nginx {Arguments}", arguments);
+            _logger.LogError(ex, "Failed to run nginx {Arguments}", string.Join(' ', arguments));
             return (-1, ex.Message);
         }
     }
@@ -137,12 +150,21 @@ public class NginxService
     {
         var config = _configService.LoadAppConfig();
 
+        // Disabled means absent from the active nginx tree. Keep the YAML record
+        // for later re-enabling, but remove any previously published route.
+        if (!host.Enabled)
+            return await DeleteConfigAsync(host.Id, cancellationToken);
+
         if (!await GenerateConfigAsync(host, cancellationToken))
             return false;
+
+        await _snapshotService.CreateAsync($"发布 {host.Id} 前自动备份", cancellationToken);
 
         var activeDir = ActiveDirectoryFor(host, config.Nginx);
         var sourceFile = Path.Combine(config.Nginx.GeneratedPath, $"{host.Id}.conf");
         var targetFile = Path.Combine(activeDir, $"{host.Id}.conf");
+        var otherDir = IsStreamHost(host) ? config.Nginx.ActivePath : config.Nginx.StreamPath;
+        var otherFile = Path.Combine(otherDir, $"{host.Id}.conf");
 
         Directory.CreateDirectory(activeDir);
 
@@ -151,14 +173,22 @@ public class NginxService
         string? previousContent = File.Exists(targetFile)
             ? await File.ReadAllTextAsync(targetFile, cancellationToken)
             : null;
+        string? previousOtherContent = File.Exists(otherFile)
+            ? await File.ReadAllTextAsync(otherFile, cancellationToken)
+            : null;
 
         try
         {
+            // A host may switch between HTTP and stream mode. Never leave both
+            // versions active under the same id.
+            if (File.Exists(otherFile))
+                File.Delete(otherFile);
             File.Copy(sourceFile, targetFile, true);
 
             if (!await ValidateConfigAsync(cancellationToken))
             {
                 await RestoreAsync(targetFile, previousContent, cancellationToken);
+                await RestoreAsync(otherFile, previousOtherContent, cancellationToken);
                 _logger.LogError("Publish aborted for {Host}: nginx -t rejected the new config", host.Id);
                 return false;
             }
@@ -166,6 +196,7 @@ public class NginxService
             if (!await ReloadAsync(cancellationToken))
             {
                 await RestoreAsync(targetFile, previousContent, cancellationToken);
+                await RestoreAsync(otherFile, previousOtherContent, cancellationToken);
                 await ReloadAsync(cancellationToken);
                 _logger.LogError("Publish rolled back for {Host}: reload failed", host.Id);
                 return false;
@@ -179,6 +210,7 @@ public class NginxService
             LastError = ex.Message;
             _logger.LogError(ex, "Failed to publish Nginx config for {Host}", host.Id);
             await RestoreAsync(targetFile, previousContent, cancellationToken);
+            await RestoreAsync(otherFile, previousOtherContent, cancellationToken);
             return false;
         }
     }
@@ -196,36 +228,6 @@ public class NginxService
         }
     }
 
-    public bool DeleteConfig(string hostId)
-    {
-        try
-        {
-            var config = _configService.LoadAppConfig();
-
-            // The host may have been either an http or a stream host, so clear both.
-            string[] candidates =
-            [
-                Path.Combine(config.Nginx.ActivePath, $"{hostId}.conf"),
-                Path.Combine(config.Nginx.StreamPath, $"{hostId}.conf"),
-                Path.Combine(config.Nginx.GeneratedPath, $"{hostId}.conf")
-            ];
-
-            foreach (var file in candidates.Where(File.Exists))
-            {
-                File.Delete(file);
-            }
-
-            _logger.LogInformation("Deleted Nginx config for {Host}", hostId);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-            _logger.LogError(ex, "Failed to delete Nginx config for {Host}", hostId);
-            return false;
-        }
-    }
-
     #region Raw Config Editing
 
     /// <summary>Lists every nginx config file the panel can edit: the main file,
@@ -235,11 +237,11 @@ public class NginxService
         var config = _configService.LoadAppConfig().Nginx;
         var files = new List<NginxConfigFile>();
 
-        var mainConf = "/etc/nginx/nginx.conf";
+        var mainConf = Path.Combine(config.ConfigPath, "nginx.conf");
         if (File.Exists(mainConf))
             files.Add(new NginxConfigFile { Path = mainConf, RelativePath = "nginx.conf", Size = new FileInfo(mainConf).Length });
 
-        ScanDir(files, "/etc/nginx/conf.d", "conf.d");
+        ScanDir(files, Path.Combine(config.ConfigPath, "conf.d"), "conf.d");
         ScanDir(files, config.ActivePath, "active");
         ScanDir(files, config.StreamPath, "stream");
         ScanDir(files, config.GeneratedPath, "generated");
@@ -291,6 +293,47 @@ public class NginxService
     /// nginx -t by temporarily swapping it in, and only then moves it into place.
     /// A rejected edit never touches the live file, so a typo cannot break nginx.
     /// </summary>
+    public async Task<bool> ValidateRawConfigAsync(
+        string path,
+        string content,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsEditablePath(path))
+        {
+            LastError = $"路径 {path} 不在允许编辑的范围内";
+            return false;
+        }
+
+        await _rawEditLock.WaitAsync(cancellationToken);
+        try
+        {
+            var previous = File.Exists(path)
+                ? await File.ReadAllTextAsync(path, cancellationToken)
+                : null;
+
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                await File.WriteAllTextAsync(path, content, cancellationToken);
+                return await ValidateConfigAsync(cancellationToken);
+            }
+            finally
+            {
+                await RestoreRawFileAsync(path, previous);
+            }
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+            _logger.LogError(ex, "Failed to validate raw config draft {Path}", path);
+            return false;
+        }
+        finally
+        {
+            _rawEditLock.Release();
+        }
+    }
+
     public async Task<bool> SaveRawConfigAsync(string path, string content, CancellationToken cancellationToken = default)
     {
         if (!IsEditablePath(path))
@@ -299,50 +342,62 @@ public class NginxService
             return false;
         }
 
-        var dir = Path.GetDirectoryName(path);
-        if (dir == null)
-            return false;
-
-        Directory.CreateDirectory(dir);
-        var previous = File.Exists(path) ? await File.ReadAllTextAsync(path, cancellationToken) : null;
-
+        await _rawEditLock.WaitAsync(cancellationToken);
+        string? previous = null;
+        var candidateWritten = false;
         try
         {
+            var dir = Path.GetDirectoryName(path);
+            if (dir == null)
+                return false;
+
+            Directory.CreateDirectory(dir);
+            previous = File.Exists(path) ? await File.ReadAllTextAsync(path, cancellationToken) : null;
             await File.WriteAllTextAsync(path, content, cancellationToken);
+            candidateWritten = true;
 
             if (!await ValidateConfigAsync(cancellationToken))
             {
-                // Restore the previous content so the live tree stays valid.
-                if (previous != null)
-                    await File.WriteAllTextAsync(path, previous, cancellationToken);
-                else if (File.Exists(path))
-                    File.Delete(path);
-
+                await RestoreRawFileAsync(path, previous);
+                candidateWritten = false;
                 _logger.LogError("Rejected raw config for {Path}: nginx -t failed", path);
                 return false;
             }
 
             if (!await ReloadAsync(cancellationToken))
             {
-                // Config is valid but reload failed — rare, but restore anyway.
-                if (previous != null)
-                    await File.WriteAllTextAsync(path, previous, cancellationToken);
-                else if (File.Exists(path))
-                    File.Delete(path);
-                await ReloadAsync(cancellationToken);
+                await RestoreRawFileAsync(path, previous);
+                candidateWritten = false;
+                await ReloadAsync(CancellationToken.None);
                 _logger.LogError("Reload failed after saving {Path}, rolled back", path);
                 return false;
             }
 
+            candidateWritten = false;
             _logger.LogInformation("Saved and reloaded raw config {Path}", path);
             return true;
         }
         catch (Exception ex)
         {
+            if (candidateWritten)
+                await RestoreRawFileAsync(path, previous);
+
             LastError = ex.Message;
             _logger.LogError(ex, "Failed to save raw config {Path}", path);
             return false;
         }
+        finally
+        {
+            _rawEditLock.Release();
+        }
+    }
+
+    private static async Task RestoreRawFileAsync(string path, string? previous)
+    {
+        if (previous != null)
+            await File.WriteAllTextAsync(path, previous, CancellationToken.None);
+        else if (File.Exists(path))
+            File.Delete(path);
     }
 
     /// <summary>
@@ -355,18 +410,26 @@ public class NginxService
         var normalized = Path.GetFullPath(path).Replace('\\', '/').TrimEnd('/');
         var config = _configService.LoadAppConfig().Nginx;
 
-        if (normalized == "/etc/nginx/nginx.conf")
+        var configRoot = Path.GetFullPath(config.ConfigPath).Replace('\\', '/').TrimEnd('/');
+        if (normalized == $"{configRoot}/nginx.conf")
             return true;
-        if (normalized.StartsWith("/etc/nginx/conf.d/", StringComparison.Ordinal))
+        if (IsWithinDirectory(normalized, $"{configRoot}/conf.d"))
             return true;
-        if (normalized.StartsWith(Path.GetFullPath(config.ActivePath).Replace('\\', '/'), StringComparison.Ordinal))
+        if (IsWithinDirectory(normalized, Path.GetFullPath(config.ActivePath).Replace('\\', '/')))
             return true;
-        if (normalized.StartsWith(Path.GetFullPath(config.StreamPath).Replace('\\', '/'), StringComparison.Ordinal))
+        if (IsWithinDirectory(normalized, Path.GetFullPath(config.StreamPath).Replace('\\', '/')))
             return true;
-        if (normalized.StartsWith(Path.GetFullPath(config.GeneratedPath).Replace('\\', '/'), StringComparison.Ordinal))
+        if (IsWithinDirectory(normalized, Path.GetFullPath(config.GeneratedPath).Replace('\\', '/')))
             return true;
 
         return false;
+    }
+
+    private static bool IsWithinDirectory(string path, string directory)
+    {
+        var root = directory.TrimEnd('/');
+        return path.Equals(root, StringComparison.Ordinal)
+            || path.StartsWith(root + "/", StringComparison.Ordinal);
     }
 
     #endregion
@@ -537,7 +600,12 @@ public class NginxService
     private string GenerateNginxConfig(ProxyHostConfig host)
     {
         var sb = new StringBuilder();
-        var config = _configService.LoadAppConfig();
+        var tlsPaths = host.Tls.Mode == Data.TlsMode.Off
+            ? ((string Cert, string Key)?)null
+            : ResolveCertificatePaths(host);
+        var upstreamScheme = GetUpstreamScheme(host);
+        var acmeChallengeRoot = NginxConfigValidator.EscapeQuotedValue(
+            Path.Combine(_configService.DataPath, "certbot").Replace('\\', '/'));
 
         sb.AppendLine($"# Auto-generated by Ncpm for {host.Id}");
         sb.AppendLine($"# Schema: {host.SchemaVersion}");
@@ -558,7 +626,7 @@ public class NginxService
             sb.AppendLine($"    server_name {string.Join(" ", host.Hosts)};");
             sb.AppendLine();
             sb.AppendLine("    location /.well-known/acme-challenge/ {");
-            sb.AppendLine("        root /var/www/certbot;");
+            sb.AppendLine($"        root \"{acmeChallengeRoot}\";");
             sb.AppendLine("    }");
             sb.AppendLine();
             sb.AppendLine("    location / {");
@@ -620,8 +688,8 @@ public class NginxService
         // SSL configuration
         if (host.Tls.Mode != Data.TlsMode.Off)
         {
-            sb.AppendLine($"    ssl_certificate {Path.Combine(config.Nginx.CertPath, $"{host.Id}.crt")};");
-            sb.AppendLine($"    ssl_certificate_key {Path.Combine(config.Nginx.CertPath, $"{host.Id}.key")};");
+            sb.AppendLine($"    ssl_certificate {tlsPaths!.Value.Cert};");
+            sb.AppendLine($"    ssl_certificate_key {tlsPaths.Value.Key};");
             sb.AppendLine("    ssl_protocols TLSv1.2 TLSv1.3;");
             sb.AppendLine("    ssl_ciphers HIGH:!aNULL:!MD5;");
             sb.AppendLine("    ssl_prefer_server_ciphers on;");
@@ -637,6 +705,14 @@ public class NginxService
 
             sb.AppendLine();
         }
+
+        // Keep HTTP-01 reachable even when the domain already has a plain HTTP
+        // proxy. Without this location nginx would forward the challenge to the
+        // upstream instead of serving the token written by AcmeService.
+        sb.AppendLine("    location ^~ /.well-known/acme-challenge/ {");
+        sb.AppendLine($"        root \"{acmeChallengeRoot}\";");
+        sb.AppendLine("    }");
+        sb.AppendLine();
 
         // Custom headers
         if (host.Http.CustomHeaders.Any())
@@ -695,14 +771,22 @@ public class NginxService
             // Proxy pass - use upstream block if multiple, direct if single
             if (host.Upstreams.Count > 1)
             {
-                sb.AppendLine($"        proxy_pass http://{host.Id}_backend;");
+                sb.AppendLine($"        proxy_pass {upstreamScheme}://{host.Id}_backend;");
             }
             else
             {
                 sb.AppendLine($"        proxy_pass {host.Upstreams[0].Url};");
             }
 
-            sb.AppendLine("        proxy_set_header Host $host;");
+            if (upstreamScheme == "https")
+            {
+                sb.AppendLine("        proxy_ssl_server_name on;");
+                sb.AppendLine("        proxy_ssl_name $proxy_host;");
+            }
+
+            sb.AppendLine(host.Http.PreserveHost
+                ? "        proxy_set_header Host $host;"
+                : "        proxy_set_header Host $proxy_host;");
             sb.AppendLine("        proxy_set_header X-Real-IP $remote_addr;");
             sb.AppendLine("        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;");
             sb.AppendLine("        proxy_set_header X-Forwarded-Proto $scheme;");
@@ -738,12 +822,12 @@ public class NginxService
         sb.AppendLine();
         if (host.Logging.AccessLog)
         {
-            var logPath = host.Logging.AccessLogPath ?? $"logs/{host.Id}-access.log";
+            var logPath = host.Logging.AccessLogPath ?? $"/app/data/logs/nginx/{host.Id}-access.log";
             sb.AppendLine($"    access_log {logPath};");
         }
         if (host.Logging.ErrorLog)
         {
-            var logPath = host.Logging.ErrorLogPath ?? $"logs/{host.Id}-error.log";
+            var logPath = host.Logging.ErrorLogPath ?? $"/app/data/logs/nginx/{host.Id}-error.log";
             sb.AppendLine($"    error_log {logPath};");
         }
 
@@ -784,7 +868,7 @@ public class NginxService
 
         if (host.Logging.ErrorLog)
         {
-            var logPath = host.Logging.ErrorLogPath ?? $"logs/{host.Id}-error.log";
+            var logPath = host.Logging.ErrorLogPath ?? $"/app/data/logs/nginx/{host.Id}-error.log";
             sb.AppendLine($"    error_log {logPath};");
         }
 
@@ -819,11 +903,19 @@ public class NginxService
         if (!rule.Actions.Any(a => a.Type == RuleActionType.Redirect || a.Type == RuleActionType.Error))
         {
             if (host.Upstreams.Count > 1)
-                sb.AppendLine($"        proxy_pass http://{host.Id}_backend;");
+                sb.AppendLine($"        proxy_pass {GetUpstreamScheme(host)}://{host.Id}_backend;");
             else if (host.Upstreams.Any())
                 sb.AppendLine($"        proxy_pass {host.Upstreams[0].Url};");
 
-            sb.AppendLine("        proxy_set_header Host $host;");
+            if (GetUpstreamScheme(host) == "https")
+            {
+                sb.AppendLine("        proxy_ssl_server_name on;");
+                sb.AppendLine("        proxy_ssl_name $proxy_host;");
+            }
+
+            sb.AppendLine(host.Http.PreserveHost
+                ? "        proxy_set_header Host $host;"
+                : "        proxy_set_header Host $proxy_host;");
             sb.AppendLine("        proxy_set_header X-Real-IP $remote_addr;");
             sb.AppendLine("        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;");
             sb.AppendLine("        proxy_set_header X-Forwarded-Proto $scheme;");
@@ -869,5 +961,121 @@ public class NginxService
                     sb.AppendLine($"{indent}proxy_set_header {action.Key} \"\";");
                 break;
         }
+    }
+
+    /// <summary>
+    /// Removes a host from the active tree, validates the remaining tree, and
+    /// reloads nginx. Files are restored when validation or reload fails.
+    /// </summary>
+    public async Task<bool> DeleteConfigAsync(
+        string hostId,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            NginxConfigValidator.ValidateIdentifier(hostId, "proxy host id");
+            var config = _configService.LoadAppConfig().Nginx;
+            var activeFiles = new[]
+            {
+                Path.Combine(config.ActivePath, $"{hostId}.conf"),
+                Path.Combine(config.StreamPath, $"{hostId}.conf")
+            };
+            var backups = new Dictionary<string, string>();
+
+            if (activeFiles.Any(File.Exists))
+                await _snapshotService.CreateAsync($"停用 {hostId} 前自动备份", cancellationToken);
+
+            foreach (var file in activeFiles.Where(File.Exists))
+            {
+                backups[file] = await File.ReadAllTextAsync(file, cancellationToken);
+                File.Delete(file);
+            }
+
+            if (backups.Count > 0)
+            {
+                if (!await ValidateConfigAsync(cancellationToken)
+                    || !await ReloadAsync(cancellationToken))
+                {
+                    foreach (var backup in backups)
+                        await RestoreAsync(backup.Key, backup.Value, cancellationToken);
+                    await ReloadAsync(cancellationToken);
+                    return false;
+                }
+            }
+
+            var generated = Path.Combine(config.GeneratedPath, $"{hostId}.conf");
+            if (File.Exists(generated))
+                File.Delete(generated);
+
+            _logger.LogInformation("Deleted and deactivated Nginx config for {Host}", hostId);
+            LastError = null;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+            _logger.LogError(ex, "Failed to deactivate Nginx config for {Host}", hostId);
+            return false;
+        }
+    }
+
+    private (string Cert, string Key) ResolveCertificatePaths(ProxyHostConfig host)
+    {
+        if (!string.IsNullOrWhiteSpace(host.Tls.CertPath)
+            && !string.IsNullOrWhiteSpace(host.Tls.KeyPath))
+        {
+            return (host.Tls.CertPath, host.Tls.KeyPath);
+        }
+
+        var certificate = _configService.LoadCertificates()
+            .Where(c => !string.IsNullOrWhiteSpace(c.CertPath) && !string.IsNullOrWhiteSpace(c.KeyPath))
+            .OrderByDescending(c => c.Domains.Concat([c.Domain])
+                .Any(domain => host.Hosts.Any(hostName =>
+                    string.Equals(domain, hostName, StringComparison.OrdinalIgnoreCase))))
+            .FirstOrDefault(c => c.Domains.Concat([c.Domain])
+                .Where(domain => !string.IsNullOrWhiteSpace(domain))
+                .Any(domain => host.Hosts.Any(hostName => CertificateCoversHost(domain, hostName))));
+
+        if (certificate == null)
+        {
+            throw new NginxConfigValidationException(
+                $"No certificate covers {string.Join(", ", host.Hosts)}. Issue or import a certificate before publishing TLS.");
+        }
+
+        return (certificate.CertPath!, certificate.KeyPath!);
+    }
+
+    private static bool CertificateCoversHost(string certificateDomain, string hostName)
+    {
+        if (string.Equals(certificateDomain, hostName, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (!certificateDomain.StartsWith("*.", StringComparison.Ordinal))
+            return false;
+
+        var suffix = certificateDomain[1..];
+        if (!hostName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        // A wildcard covers exactly one label: *.example.com matches
+        // app.example.com, but not deep.app.example.com.
+        var prefix = hostName[..^suffix.Length];
+        return prefix.Length > 0 && !prefix.Contains('.');
+    }
+
+    private static string GetUpstreamScheme(ProxyHostConfig host)
+    {
+        if (host.Upstreams.Count == 0)
+            return "http";
+
+        var schemes = host.Upstreams
+            .Select(u => Uri.TryCreate(u.Url, UriKind.Absolute, out var uri) ? uri.Scheme : "http")
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (schemes.Count > 1)
+            throw new NginxConfigValidationException("All upstreams in one proxy host must use the same scheme");
+
+        return schemes[0].ToLowerInvariant();
     }
 }

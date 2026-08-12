@@ -10,8 +10,9 @@ public class MonitorService : IDisposable
     private readonly HealthCheckService _healthCheckService;
     private readonly ILogger<MonitorService> _logger;
     private readonly ConcurrentQueue<SystemMetrics> _systemMetrics = new();
-    private readonly ConcurrentQueue<RequestMetrics> _requestMetrics = new();
+    private readonly ConcurrentDictionary<string, ContainerMetrics> _containerMetrics = new();
     private Timer? _metricsTimer;
+    private int _collecting;
     private bool _disposed;
 
     public MonitorService(
@@ -39,7 +40,9 @@ public class MonitorService : IDisposable
 
     private async void CollectMetrics(object? state)
     {
-        // async void timer callback: everything stays inside the try.
+        if (Interlocked.CompareExchange(ref _collecting, 1, 0) != 0)
+            return;
+
         try
         {
             var metrics = new SystemMetrics();
@@ -57,10 +60,40 @@ public class MonitorService : IDisposable
                 var containers = await _dockerService.ListContainersAsync();
                 metrics.ContainerCount = containers.Count;
                 metrics.RunningContainers = containers.Count(c => c.IsRunning);
+
+                var running = containers.Where(c => c.IsRunning).ToList();
+                var activeKeys = running.Select(c => $"{c.HostId}:{c.Id}").ToHashSet(StringComparer.Ordinal);
+                foreach (var stale in _containerMetrics.Keys.Where(k => !activeKeys.Contains(k)))
+                    _containerMetrics.TryRemove(stale, out _);
+
+                await Parallel.ForEachAsync(
+                    running,
+                    new ParallelOptions { MaxDegreeOfParallelism = 4 },
+                    async (container, cancellationToken) =>
+                    {
+                        var stats = await _dockerService.GetContainerStatsAsync(
+                            container.Id,
+                            container.HostId,
+                            cancellationToken);
+                        if (stats == null)
+                            return;
+
+                        _containerMetrics[$"{container.HostId}:{container.Id}"] = new ContainerMetrics
+                        {
+                            ContainerId = container.Id,
+                            Name = string.IsNullOrWhiteSpace(stats.Name) ? container.Name : stats.Name,
+                            HostId = container.HostId,
+                            HostName = container.HostName,
+                            CpuUsage = stats.CpuPercent,
+                            MemoryUsage = ToInt64(stats.MemoryUsage),
+                            MemoryLimit = ToInt64(stats.MemoryLimit),
+                            CollectedAt = stats.CollectedAt
+                        };
+                    });
             }
-            catch
+            catch (Exception ex)
             {
-                // Docker might not be available
+                _logger.LogDebug(ex, "Container metrics are temporarily unavailable");
             }
 
             // Collect health status
@@ -81,6 +114,10 @@ public class MonitorService : IDisposable
         {
             _logger.LogError(ex, "Failed to collect metrics");
         }
+        finally
+        {
+            Volatile.Write(ref _collecting, 0);
+        }
     }
 
     public SystemMetrics GetCurrentMetrics()
@@ -95,10 +132,14 @@ public class MonitorService : IDisposable
 
     public List<ContainerMetrics> GetContainerMetrics()
     {
-        // This would typically come from Docker stats API
-        // For now, return empty list
-        return new List<ContainerMetrics>();
+        return _containerMetrics.Values
+            .OrderBy(x => x.HostName, StringComparer.Ordinal)
+            .ThenBy(x => x.Name, StringComparer.Ordinal)
+            .ToList();
     }
+
+    private static long ToInt64(ulong value) =>
+        value > long.MaxValue ? long.MaxValue : (long)value;
 
     public void Dispose()
     {

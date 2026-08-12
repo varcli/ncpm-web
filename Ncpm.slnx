@@ -3,4 +3,5 @@
     <Platform Name="Any CPU" />
   </Configurations>
   <Project Path="src/Ncpm.Web/Ncpm.Web.csproj" />
+  <Project Path="tests/Ncpm.Web.Tests/Ncpm.Web.Tests.csproj" />
 </Solution>

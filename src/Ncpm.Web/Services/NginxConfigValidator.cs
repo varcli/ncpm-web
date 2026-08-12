@@ -86,6 +86,23 @@ public static class NginxConfigValidator
         ValidateOptionalPath(host.Logging.AccessLogPath, "access log path");
         ValidateOptionalPath(host.Logging.ErrorLogPath, "error log path");
         ValidateOptionalPath(host.Mtls?.CaCertPath, "mTLS CA certificate path");
+        ValidateOptionalPath(host.Tls.CertPath, "TLS certificate path");
+        ValidateOptionalPath(host.Tls.KeyPath, "TLS private key path");
+
+        if (host.Tls.Mode == TlsMode.Manual
+            && (string.IsNullOrWhiteSpace(host.Tls.CertPath) || string.IsNullOrWhiteSpace(host.Tls.KeyPath)))
+        {
+            throw new NginxConfigValidationException(
+                "Manual TLS requires both a certificate path and a private key path");
+        }
+
+        var upstreamSchemes = host.Upstreams
+            .Select(upstream => Uri.TryCreate(upstream.Url, UriKind.Absolute, out var uri) ? uri.Scheme : string.Empty)
+            .Where(scheme => !string.IsNullOrEmpty(scheme))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (upstreamSchemes.Count > 1)
+            throw new NginxConfigValidationException("All upstreams must use the same URL scheme");
 
         if (!string.IsNullOrEmpty(host.Http.Index))
             ValidateNoBreakers(host.Http.Index, "index");
@@ -101,6 +118,17 @@ public static class NginxConfigValidator
         {
             ValidateRule(rule);
         }
+
+        if (host.Rules.Count(rule => rule.IsDefault) > 1)
+            throw new NginxConfigValidationException("Only one default route rule is allowed");
+
+        var duplicatePath = host.Rules
+            .Where(rule => !rule.IsDefault)
+            .Select(rule => rule.Conditions.Single(condition => condition.Type == RuleMatchType.Path).Value)
+            .GroupBy(path => path, StringComparer.Ordinal)
+            .FirstOrDefault(group => group.Count() > 1)?.Key;
+        if (duplicatePath is not null)
+            throw new NginxConfigValidationException($"Duplicate route path '{duplicatePath}'");
     }
 
     /// <summary>Ids become file names and Nginx upstream identifiers.</summary>
@@ -200,12 +228,21 @@ public static class NginxConfigValidator
         if (!string.IsNullOrEmpty(rule.Name))
             ValidateNoBreakers(rule.Name, "rule name");
 
+        var pathConditionCount = rule.Conditions.Count(condition => condition.Type == RuleMatchType.Path);
+        if (rule.IsDefault && rule.Conditions.Count != 0)
+            throw new NginxConfigValidationException("The default route rule cannot contain match conditions");
+        if (!rule.IsDefault && (rule.Conditions.Count != 1 || pathConditionCount != 1))
+            throw new NginxConfigValidationException("A non-default route rule requires exactly one path condition");
+
         foreach (var condition in rule.Conditions)
         {
-            if (condition.Type == RuleMatchType.Path)
-                ValidateLocationPath(condition.Value);
-            else
-                ValidateNoBreakers(condition.Value, $"{condition.Type} condition value");
+            if (condition.Type != RuleMatchType.Path)
+                throw new NginxConfigValidationException(
+                    $"Route condition {condition.Type} is not supported yet; use a path condition");
+            if (condition.Negate)
+                throw new NginxConfigValidationException("Negated path conditions are not supported");
+
+            ValidateLocationPath(condition.Value);
         }
 
         foreach (var action in rule.Actions)

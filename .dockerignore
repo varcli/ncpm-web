@@ -1,4 +1,5 @@
 **/.git
+**/.tmp
 **/bin
 **/obj
 **/logs

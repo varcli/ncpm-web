@@ -1,5 +1,6 @@
 services:
   panel:
+    image: "${NCPM_IMAGE:-ghcr.io/varcli/ncpm-web}:${NCPM_VERSION:-latest}"
     build:
       context: .
       dockerfile: deploy/Dockerfile
@@ -14,13 +15,35 @@ services:
       # TCP/UDP stream hosts need their listen ports published here as well,
       # e.g. - "5432:5432"
     volumes:
-      - ./deploy/data:/app/data
+      - ${NCPM_DATA_PATH:-./deploy/data}:/app/data
       # The socket must be read-write for Compose to create/start/stop containers.
       # For untrusted networks, front this with a restricted Docker socket proxy.
       - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      # Used when an automatically discovered container only exposes a published
+      # host port and does not share a Docker network with the panel.
+      - "host.docker.internal:host-gateway"
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - ASPNETCORE_URLS=http://+:8098
+      # These values seed data/config/config.yml only on the first start.
+      - Panel__Host=${Panel__Host:-0.0.0.0}
+      - Panel__Port=${Panel__Port:-8098}
+      - Docker__Host=${Docker__Host:-unix:///var/run/docker.sock}
+      - Nginx__ConfigPath=${Nginx__ConfigPath:-/etc/nginx}
+      - Nginx__ExecutablePath=${Nginx__ExecutablePath:-nginx}
+      - Security__RequireAuth=${Security__RequireAuth:-true}
+      - Security__SessionTimeout=${Security__SessionTimeout:-3600}
+      - Security__MaxLoginAttempts=${Security__MaxLoginAttempts:-5}
+      - Security__LockoutDuration=${Security__LockoutDuration:-300}
+      - Logging__Level=${Logging__Level:-Information}
+      - Logging__Path=${Logging__Path:-/app/data/logs}
+      - NCPM_ADMIN_USERNAME=${NCPM_ADMIN_USERNAME:-admin}
+      - NCPM_ADMIN_PASSWORD=${NCPM_ADMIN_PASSWORD:-}
+      - NCPM_ADMIN_PASSWORD_FILE=${NCPM_ADMIN_PASSWORD_FILE:-}
+      # Use an absolute host path here when panel-managed Compose projects use
+      # relative bind mounts (for example /opt/ncpm/data/compose).
+      - Compose__HostPathPrefix=${NCPM_COMPOSE_HOST_PATH:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8098/health"]
       interval: 30s

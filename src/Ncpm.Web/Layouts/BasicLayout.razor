@@ -1,8 +1,13 @@
 ﻿@namespace Ncpm.Layouts
 @inherits LayoutComponentBase
+@using Microsoft.AspNetCore.Components.Authorization
+@using Ncpm.Services
+@inject AuthenticationStateProvider AuthenticationStateProvider
+@inject NavigationManager Navigation
+@inject Ncpm.Services.ConfigService ConfigService
 
 <AntDesign.ProLayout.BasicLayout 
-    Logo="@("https://gw.alipayobjects.com/zos/rmsportal/KDpgvguMpGfqaHPjicRK.svg")"
+    Logo="@("/assets/logo.svg")"
     MenuData="_menuData"
     MenuAccordion
     @bind-Collapsed="collapsed">
@@ -17,12 +22,15 @@
         </Space>
     </HeaderContentRender>
     <RightContentRender>
+        <Button Type="@ButtonType.Link" Icon="@IconType.Outline.Logout" OnClick="Logout">
+            退出登录
+        </Button>
     </RightContentRender>
     <ChildContent>
         <ReuseTabs></ReuseTabs>
     </ChildContent>
     <FooterRender>
-        <FooterView Copyright="@($"{DateTime.Now.Year} Ncpm · Nginx 反向代理管理面板")" Links="Links"></FooterView>
+        <FooterView Copyright="@($"{DateTime.Now.Year} NCPM · Container & Proxy Control")" Links="Links"></FooterView>
     </FooterRender>
 </AntDesign.ProLayout.BasicLayout>
 
@@ -31,34 +39,37 @@
 @code{
     bool collapsed;
 
-    public LinkItem[] Links =
+    public LinkItem[] Links = [];
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-            new LinkItem
-            {
-                Key = "Ant Design Blazor",
-                Title = "Ant Design Blazor",
-                Href = "https://antblazor.com",
-                BlankTarget = true,
-            },
-            new LinkItem
-            {
-                Key = "github",
-                Title = (RenderFragment)(@<Icon Type="github" />),
-                Href = "https://github.com/ant-design-blazor/ant-design-pro-blazor",
-                BlankTarget = true,
-            },
-            new LinkItem
-            {
-                Key = "Blazor",
-                Title = "Blazor",
-                Href = "https://dotnet.microsoft.com/apps/aspnet/web-apps/blazor?WT.mc_id=DT-MVP-5003987",
-                BlankTarget = true,
-            }
-    };
+        if (!firstRender)
+            return;
+
+        var state = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+        var mustChangePassword = state.User.HasClaim("ncpm:must_change_password", "true");
+        var currentPath = Navigation.ToBaseRelativePath(Navigation.Uri)
+            .Split('?', '#')[0]
+            .Trim('/');
+        if (mustChangePassword
+            && !currentPath.Equals("settings/account", StringComparison.OrdinalIgnoreCase))
+        {
+            Navigation.NavigateTo("/settings/account", forceLoad: true);
+        }
+    }
 
     void Toggle()
     {
         collapsed = !collapsed;
+    }
+
+    async Task Logout()
+    {
+        if (AuthenticationStateProvider is AuthStateProvider provider)
+            await provider.NotifyUserLogout();
+
+        var requireAuth = ConfigService.LoadAppConfig().Security.RequireAuth;
+        Navigation.NavigateTo(requireAuth ? "/login" : "/", forceLoad: true);
     }
 
 }

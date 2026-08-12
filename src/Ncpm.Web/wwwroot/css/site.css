@@ -53,3 +53,382 @@ ol {
     min-height: 100vh;
   }
 }
+
+/* Operations dashboard ---------------------------------------------------- */
+:root {
+  --ops-ink: #102338;
+  --ops-muted: #6b7b8c;
+  --ops-line: #dfe6ec;
+  --ops-paper: #f4f7f9;
+  --ops-deck: #0d1b2a;
+  --ops-deck-soft: #14273b;
+  --ops-cyan: #39c6d8;
+  --ops-green: #37b982;
+  --ops-amber: #e7a93b;
+  --ops-red: #e66666;
+}
+
+.ops-dashboard {
+  color: var(--ops-ink);
+  font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+}
+
+.ops-dashboard button {
+  font: inherit;
+}
+
+.ops-command-deck {
+  position: relative;
+  overflow: hidden;
+  padding: 28px 30px 0;
+  color: #eaf3f7;
+  background: var(--ops-deck);
+  border: 1px solid #1d344a;
+  border-radius: 14px;
+  box-shadow: 0 16px 40px rgba(13, 27, 42, 0.16);
+}
+
+.ops-command-deck::after {
+  position: absolute;
+  top: 0;
+  right: 32px;
+  width: 1px;
+  height: 76px;
+  content: "";
+  background: var(--ops-cyan);
+  box-shadow: 8px 0 0 rgba(57, 198, 216, 0.42), 16px 0 0 rgba(57, 198, 216, 0.18);
+}
+
+.ops-command-copy {
+  max-width: 720px;
+}
+
+.ops-eyebrow,
+.ops-section-kicker,
+.ops-memory-mark {
+  color: var(--ops-cyan);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.ops-command-copy h1 {
+  margin: 6px 0 4px;
+  color: #fff;
+  font-family: Bahnschrift, "Microsoft YaHei UI", sans-serif;
+  font-size: clamp(24px, 3vw, 34px);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.ops-command-copy p {
+  margin: 0;
+  color: #9fb1c0;
+  font-size: 14px;
+}
+
+.ops-command-actions {
+  position: absolute;
+  top: 30px;
+  right: 64px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.ops-updated {
+  color: #7890a3;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+}
+
+.ops-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 14px;
+  color: #dffaff;
+  cursor: pointer;
+  background: #153249;
+  border: 1px solid #28607a;
+  border-radius: 7px;
+}
+
+.ops-refresh:hover:not(:disabled) {
+  background: #1b4059;
+  border-color: var(--ops-cyan);
+}
+
+.ops-refresh:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.ops-signal-rail {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 26px -30px 0;
+  border-top: 1px solid #20384e;
+}
+
+.ops-signal {
+  position: relative;
+  display: grid;
+  grid-template-columns: 12px 1fr auto;
+  gap: 3px 9px;
+  align-items: center;
+  min-width: 0;
+  padding: 16px 20px;
+  color: #dce9ef;
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-right: 1px solid #20384e;
+}
+
+.ops-signal:last-child {
+  border-right: 0;
+}
+
+.ops-signal:hover {
+  background: var(--ops-deck-soft);
+}
+
+.ops-signal-name {
+  color: #91a7b8;
+  font-size: 12px;
+}
+
+.ops-signal strong {
+  color: #f4fbfd;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.ops-signal small {
+  grid-column: 2 / 4;
+  overflow: hidden;
+  color: #6f8799;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ops-signal-dot {
+  grid-row: 1 / 3;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 4px rgba(121, 143, 160, 0.12);
+}
+
+.ops-signal-dot.healthy { background: var(--ops-green); box-shadow: 0 0 0 4px rgba(55, 185, 130, 0.14); }
+.ops-signal-dot.warning { background: var(--ops-amber); box-shadow: 0 0 0 4px rgba(231, 169, 59, 0.14); }
+.ops-signal-dot.fault { background: var(--ops-red); box-shadow: 0 0 0 4px rgba(230, 102, 102, 0.14); }
+.ops-signal-dot.pending { background: #7890a3; }
+
+.ops-alert {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: center;
+  margin-top: 14px;
+  padding: 13px 16px;
+  color: #713d13;
+  background: #fff7e7;
+  border: 1px solid #f0d39c;
+  border-radius: 10px;
+}
+
+.ops-alert > .anticon { color: var(--ops-amber); font-size: 20px; }
+.ops-alert div { display: flex; flex-direction: column; min-width: 0; }
+.ops-alert div span { overflow: hidden; color: #8a633d; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.ops-alert button { color: #8a501d; cursor: pointer; background: transparent; border: 0; font-weight: 650; }
+
+.ops-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 16px 0;
+  background: #fff;
+  border: 1px solid var(--ops-line);
+  border-radius: 12px;
+}
+
+.ops-metric {
+  min-width: 0;
+  padding: 18px 20px;
+  border-right: 1px solid var(--ops-line);
+}
+
+.ops-metric:last-child { border-right: 0; }
+.ops-metric > span { color: var(--ops-muted); font-size: 12px; }
+.ops-metric > strong { display: block; margin: 3px 0 8px; font-family: Bahnschrift, "Segoe UI", sans-serif; font-size: 27px; font-weight: 600; }
+.ops-metric > strong small { margin-left: 4px; color: #8494a3; font-size: 13px; font-weight: 500; }
+.ops-metric p { margin: 7px 0 0; color: #8494a3; font-size: 11px; }
+
+.ops-meter {
+  height: 4px;
+  overflow: hidden;
+  background: #edf1f4;
+  border-radius: 8px;
+}
+
+.ops-meter i { display: block; height: 100%; background: var(--ops-cyan); border-radius: inherit; transition: width 300ms ease; }
+.ops-meter.danger i { background: var(--ops-red); }
+.ops-memory-mark { display: inline-block; height: 4px; margin: 0 0 0; color: #8ca0af; font-size: 9px; line-height: 4px; }
+
+.ops-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(300px, 0.8fr);
+  gap: 16px;
+}
+
+.ops-panel,
+.ops-shortcuts {
+  background: #fff;
+  border: 1px solid var(--ops-line);
+  border-radius: 12px;
+}
+
+.ops-panel {
+  min-height: 340px;
+  padding: 20px;
+}
+
+.ops-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.ops-panel-header h2 {
+  margin: 2px 0 0;
+  color: var(--ops-ink);
+  font-family: Bahnschrift, "Microsoft YaHei UI", sans-serif;
+  font-size: 19px;
+  font-weight: 600;
+}
+
+.ops-section-kicker { color: #6f8799; font-size: 9px; }
+.ops-text-action { color: #406177; cursor: pointer; background: transparent; border: 0; font-size: 12px; }
+.ops-text-action:hover { color: #0e8394; }
+
+.ops-route-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ops-route {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 11px;
+  align-items: center;
+  min-width: 0;
+  padding: 13px;
+  text-align: left;
+  cursor: pointer;
+  background: #f7f9fa;
+  border: 1px solid #e4eaee;
+  border-radius: 9px;
+}
+
+.ops-route:hover { background: #f0f6f7; border-color: #b7d8dd; transform: translateY(-1px); }
+.ops-route-pulse { width: 9px; height: 9px; background: #8ca0af; border: 2px solid #fff; border-radius: 50%; box-shadow: 0 0 0 2px #c9d3da; }
+.ops-route.healthy .ops-route-pulse { background: var(--ops-green); box-shadow: 0 0 0 2px rgba(55, 185, 130, 0.25); }
+.ops-route.fault .ops-route-pulse { background: var(--ops-red); box-shadow: 0 0 0 2px rgba(230, 102, 102, 0.24); }
+.ops-route-copy { display: flex; min-width: 0; flex-direction: column; }
+.ops-route-copy strong { overflow: hidden; color: #173047; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.ops-route-copy small { overflow: hidden; color: #8293a1; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.ops-route-latency { color: #526b7d; font-family: "Cascadia Code", Consolas, monospace; font-size: 13px; }
+.ops-route-latency small { margin-left: 2px; color: #94a3ae; font-size: 9px; }
+
+.ops-live { display: flex; align-items: center; gap: 6px; color: #667e8f; font-family: "Cascadia Code", Consolas, monospace; font-size: 9px; }
+.ops-live i { width: 6px; height: 6px; background: var(--ops-green); border-radius: 50%; box-shadow: 0 0 0 3px rgba(55, 185, 130, 0.12); }
+
+.ops-timeline { padding-left: 4px; }
+.ops-event { position: relative; display: grid; grid-template-columns: 12px 1fr; gap: 10px; padding-bottom: 17px; }
+.ops-event:not(:last-child)::after { position: absolute; top: 12px; bottom: 1px; left: 4px; width: 1px; content: ""; background: #dce4e9; }
+.ops-event > i { z-index: 1; width: 9px; height: 9px; margin-top: 4px; background: var(--ops-cyan); border: 2px solid #fff; border-radius: 50%; box-shadow: 0 0 0 2px rgba(57, 198, 216, 0.22); }
+.ops-event.warning > i { background: var(--ops-amber); box-shadow: 0 0 0 2px rgba(231, 169, 59, 0.22); }
+.ops-event.fault > i { background: var(--ops-red); box-shadow: 0 0 0 2px rgba(230, 102, 102, 0.22); }
+.ops-event div { display: flex; min-width: 0; flex-direction: column; }
+.ops-event div > span { color: #8b9ba8; font-family: "Cascadia Code", Consolas, monospace; font-size: 9px; }
+.ops-event strong { margin: 2px 0; color: #20384e; font-size: 12px; }
+.ops-event p { display: -webkit-box; overflow: hidden; margin: 0; color: #728492; font-size: 11px; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+
+.ops-empty {
+  display: flex;
+  min-height: 230px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  color: #8294a2;
+  text-align: center;
+  border: 1px dashed #d7e0e6;
+  border-radius: 9px;
+}
+
+.ops-empty > .anticon { margin-bottom: 12px; color: #9cb3c1; font-size: 28px; }
+.ops-empty strong { color: #405a6d; font-size: 13px; }
+.ops-empty p { max-width: 320px; margin: 4px 0 13px; font-size: 11px; }
+.ops-empty button { padding: 6px 12px; color: #176d7b; cursor: pointer; background: #eef9fa; border: 1px solid #c5e7ea; border-radius: 6px; font-size: 11px; }
+.ops-empty-compact { min-height: 230px; }
+
+.ops-shortcuts { margin-top: 16px; padding: 20px; }
+.ops-shortcut-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.ops-shortcut-grid > button { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; min-width: 0; padding: 13px; color: #365064; text-align: left; cursor: pointer; background: #f7f9fa; border: 1px solid #e4eaee; border-radius: 8px; }
+.ops-shortcut-grid > button:hover { color: #0e8394; background: #f0f7f8; border-color: #b9dde1; }
+.ops-shortcut-grid > button > .anticon:first-child { color: #17889a; font-size: 18px; }
+.ops-shortcut-grid span { display: flex; min-width: 0; flex-direction: column; }
+.ops-shortcut-grid strong { color: #20384e; font-size: 12px; }
+.ops-shortcut-grid small { overflow: hidden; color: #8494a1; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+
+.ops-dashboard button:focus-visible {
+  outline: 2px solid var(--ops-cyan);
+  outline-offset: 2px;
+}
+
+@media (max-width: 1100px) {
+  .ops-command-actions { position: static; margin-top: 18px; }
+  .ops-signal-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ops-signal:nth-child(2) { border-right: 0; }
+  .ops-signal:nth-child(-n + 2) { border-bottom: 1px solid #20384e; }
+  .ops-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ops-metric:nth-child(2) { border-right: 0; }
+  .ops-metric:nth-child(-n + 2) { border-bottom: 1px solid var(--ops-line); }
+  .ops-workspace { grid-template-columns: 1fr; }
+  .ops-shortcut-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 640px) {
+  .ops-command-deck { padding: 22px 18px 0; }
+  .ops-command-deck::after { right: 16px; }
+  .ops-command-actions { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .ops-signal-rail { grid-template-columns: 1fr; margin-right: -18px; margin-left: -18px; }
+  .ops-signal { border-right: 0; border-bottom: 1px solid #20384e; }
+  .ops-signal:nth-child(3) { border-bottom: 1px solid #20384e; }
+  .ops-metrics { grid-template-columns: 1fr; }
+  .ops-metric { border-right: 0; border-bottom: 1px solid var(--ops-line); }
+  .ops-metric:nth-child(3) { border-bottom: 1px solid var(--ops-line); }
+  .ops-route-grid,
+  .ops-shortcut-grid { grid-template-columns: 1fr; }
+  .ops-panel,
+  .ops-shortcuts { padding: 16px; }
+  .ops-alert { grid-template-columns: auto 1fr; }
+  .ops-alert button { grid-column: 2; padding: 0; text-align: left; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ops-dashboard *,
+  .ops-dashboard *::before,
+  .ops-dashboard *::after {
+    scroll-behavior: auto !important;
+    transition: none !important;
+  }
+}

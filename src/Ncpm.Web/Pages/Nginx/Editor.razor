@@ -101,7 +101,10 @@
 
     private async Task ValidateOnly()
     {
-        if (await NginxService.ValidateConfigAsync())
+        if (_selectedFile == null)
+            return;
+
+        if (await NginxService.ValidateRawConfigAsync(_selectedFile, _content))
         {
             Message.Success("配置校验通过");
         }

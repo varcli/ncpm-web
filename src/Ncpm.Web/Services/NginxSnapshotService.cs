@@ -13,7 +13,9 @@ public class NginxSnapshotService
     private readonly ConfigService _configService;
     private readonly ILogger<NginxSnapshotService> _logger;
 
-    public NginxSnapshotService(ConfigService configService, ILogger<NginxSnapshotService> logger)
+    public NginxSnapshotService(
+        ConfigService configService,
+        ILogger<NginxSnapshotService> logger)
     {
         _configService = configService;
         _logger = logger;
@@ -36,8 +38,13 @@ public class NginxSnapshotService
 
         Directory.CreateDirectory(BackupsRoot);
 
-        var id = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss");
+        var id = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fff");
         var snapshotDir = Path.Combine(BackupsRoot, id);
+        while (Directory.Exists(snapshotDir))
+        {
+            id = $"{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}-{Guid.NewGuid():N}"[..29];
+            snapshotDir = Path.Combine(BackupsRoot, id);
+        }
         Directory.CreateDirectory(snapshotDir);
 
         var snapshot = new NginxSnapshot
@@ -157,18 +164,18 @@ public class NginxSnapshotService
         try
         {
             var activeSrc = Path.Combine(snapshotDir, "active");
+            Directory.CreateDirectory(config.ActivePath);
+            ClearDirectory(config.ActivePath);
             if (Directory.Exists(activeSrc))
             {
-                Directory.CreateDirectory(config.ActivePath);
-                ClearDirectory(config.ActivePath);
                 CopyDirectory(activeSrc, config.ActivePath);
             }
 
             var streamSrc = Path.Combine(snapshotDir, "stream");
+            Directory.CreateDirectory(config.StreamPath);
+            ClearDirectory(config.StreamPath);
             if (Directory.Exists(streamSrc))
             {
-                Directory.CreateDirectory(config.StreamPath);
-                ClearDirectory(config.StreamPath);
                 CopyDirectory(streamSrc, config.StreamPath);
             }
 
@@ -180,6 +187,45 @@ public class NginxSnapshotService
             _logger.LogError(ex, "Failed to restore nginx snapshot {Id}", snapshotId);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Restores, validates, and reloads a snapshot as one transaction. A safety
+    /// snapshot of the current tree is restored automatically on any failure.
+    /// </summary>
+    public async Task<bool> RestoreAndReloadAsync(
+        string snapshotId,
+        NginxService nginxService,
+        CancellationToken cancellationToken = default)
+    {
+        var safety = await CreateAsync($"回滚 {snapshotId} 前自动备份", cancellationToken);
+        if (!await RestoreAsync(snapshotId, cancellationToken))
+            return false;
+
+        if (await nginxService.ValidateConfigAsync(cancellationToken)
+            && await nginxService.ReloadAsync(cancellationToken))
+        {
+            return true;
+        }
+
+        _logger.LogWarning("Snapshot {Id} failed validation/reload; restoring safety snapshot", snapshotId);
+        if (safety != null && await RestoreAsync(safety.Id, CancellationToken.None))
+        {
+            await nginxService.ValidateConfigAsync(CancellationToken.None);
+            await nginxService.ReloadAsync(CancellationToken.None);
+        }
+        else if (safety == null)
+        {
+            var config = _configService.LoadAppConfig().Nginx;
+            Directory.CreateDirectory(config.ActivePath);
+            Directory.CreateDirectory(config.StreamPath);
+            ClearDirectory(config.ActivePath);
+            ClearDirectory(config.StreamPath);
+            await nginxService.ValidateConfigAsync(CancellationToken.None);
+            await nginxService.ReloadAsync(CancellationToken.None);
+        }
+
+        return false;
     }
 
     public bool Delete(string snapshotId)

@@ -35,9 +35,9 @@
 }
 
 <Spin Spinning="@_loading">
-    <Table TItem="ComposeProject" DataSource="@_projects" RowKey="x => x.Name">
+    <Table TItem="ComposeProject" DataSource="@_projects" RowKey="x => x.Key">
         <PropertyColumn Property="p => p.Name" Title="项目">
-            <a @onclick="() => NavigateToDetail(context.Name)" style="cursor: pointer;">
+            <a @onclick="() => NavigateToDetail(context)" style="cursor: pointer;">
                 @context.Name
             </a>
             @if (context.IsManaged)
@@ -76,13 +76,13 @@
         <ActionColumn Title="操作" Width="280">
             <Space>
                 <SpaceItem>
-                    <Button Size="@ButtonSize.Small" OnClick="() => NavigateToDetail(context.Name)">详情</Button>
+                    <Button Size="@ButtonSize.Small" OnClick="() => NavigateToDetail(context)">详情</Button>
                 </SpaceItem>
                 <SpaceItem>
-                    <Button Size="@ButtonSize.Small" Type="@ButtonType.Primary" OnClick="() => Up(context.Name)">启动</Button>
+                    <Button Size="@ButtonSize.Small" Type="@ButtonType.Primary" OnClick="() => Up(context)">启动</Button>
                 </SpaceItem>
                 <SpaceItem>
-                    <Popconfirm Title="确定停止此应用栈吗？" OnConfirm="() => Down(context.Name)">
+                    <Popconfirm Title="确定停止此应用栈吗？" OnConfirm="() => Down(context)">
                         <Button Size="@ButtonSize.Small" Danger>停止</Button>
                     </Popconfirm>
                 </SpaceItem>
@@ -163,14 +163,14 @@
         }
     }
 
-    private void NavigateToDetail(string name)
+    private void NavigateToDetail(ComposeProject project)
     {
-        Navigation.NavigateTo($"/compose/{name}");
+        Navigation.NavigateTo($"/compose/{project.Name}?host={Uri.EscapeDataString(project.HostId)}");
     }
 
-    private async Task Up(string name)
+    private async Task Up(ComposeProject project)
     {
-        var result = await ComposeService.UpAsync(name);
+        var result = await ComposeService.UpAsync(project.Name, hostId: project.HostId);
         if (result.Success)
         {
             Message.Success("应用栈已启动");
@@ -182,9 +182,9 @@
         await Refresh();
     }
 
-    private async Task Down(string name)
+    private async Task Down(ComposeProject project)
     {
-        var result = await ComposeService.DownAsync(name);
+        var result = await ComposeService.DownAsync(project.Name, hostId: project.HostId);
         if (result.Success)
         {
             Message.Success("应用栈已停止");

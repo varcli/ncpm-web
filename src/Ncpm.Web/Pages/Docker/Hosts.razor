@@ -89,7 +89,6 @@
                 <SelectOptions>
                     <SelectOption TItem="DockerHostType" TItemValue="DockerHostType" Value="@DockerHostType.Local" Label="本地 Unix Socket" />
                     <SelectOption TItem="DockerHostType" TItemValue="DockerHostType" Value="@DockerHostType.Tcp" Label="TCP" />
-                    <SelectOption TItem="DockerHostType" TItemValue="DockerHostType" Value="@DockerHostType.Ssh" Label="SSH" />
                 </SelectOptions>
             </Select>
         </FormItem>
@@ -102,29 +101,25 @@
             <FormItem Label="端口">
                 <AntDesign.InputNumber @bind-Value="@_editingHost.TcpPort" Style="width: 100%" />
             </FormItem>
-            <FormItem Label="使用 TLS">
+            <FormItem Label="使用 HTTPS/TLS（系统信任证书）">
                 <Switch @bind-Value="@_editingHost.UseTls" />
             </FormItem>
+            @if (_editingHost.UseTls)
+            {
+                <Alert Type="@AlertType.Info" ShowIcon="true" Style="margin-bottom: 16px;"
+                       Message="Docker TLS"
+                       Description="留空时使用系统 CA 验证服务端；Docker 开启双向 TLS 时，请同时配置 CA、客户端证书和私钥的容器内路径。" />
+                <FormItem Label="CA 证书路径（可选）">
+                    <Input @bind-Value="@_editingHost.TlsCaCertPath" Placeholder="/app/data/secrets/docker/ca.pem" />
+                </FormItem>
+                <FormItem Label="客户端证书路径（可选）">
+                    <Input @bind-Value="@_editingHost.TlsClientCertPath" Placeholder="/app/data/secrets/docker/cert.pem" />
+                </FormItem>
+                <FormItem Label="客户端私钥路径（可选）">
+                    <Input @bind-Value="@_editingHost.TlsClientKeyPath" Placeholder="/app/data/secrets/docker/key.pem" />
+                </FormItem>
+            }
         }
-        else if (_editingHost.Type == DockerHostType.Ssh)
-        {
-            <FormItem Label="主机">
-                <Input @bind-Value="@_editingHost.Host" Placeholder="192.168.1.100" />
-            </FormItem>
-            <FormItem Label="SSH 端口">
-                <AntDesign.InputNumber @bind-Value="@_editingHost.SshPort" Style="width: 100%" />
-            </FormItem>
-            <FormItem Label="SSH 用户">
-                <Input @bind-Value="@_editingHost.SshUser" />
-            </FormItem>
-            <FormItem Label="SSH 密码">
-                <InputPassword @bind-Value="@_editingHost.SshPassword" />
-            </FormItem>
-            <FormItem Label="SSH 密钥路径">
-                <Input @bind-Value="@_editingHost.SshKeyPath" Placeholder="~/.ssh/id_rsa" />
-            </FormItem>
-        }
-
         <FormItem Label="描述">
             <Input @bind-Value="@_editingHost.Description" />
         </FormItem>
@@ -183,6 +178,23 @@
         {
             Message.Warning("请填写必填字段");
             return;
+        }
+
+        if (_editingHost.Type == DockerHostType.Ssh)
+        {
+            Message.Error("当前版本不支持 SSH 传输，请改用受 TLS 保护的 Docker TCP API 或 Socket Proxy");
+            return;
+        }
+
+        if (_editingHost.Type == DockerHostType.Tcp && _editingHost.UseTls)
+        {
+            var hasClientCert = !string.IsNullOrWhiteSpace(_editingHost.TlsClientCertPath);
+            var hasClientKey = !string.IsNullOrWhiteSpace(_editingHost.TlsClientKeyPath);
+            if (hasClientCert != hasClientKey)
+            {
+                Message.Error("Docker mTLS 客户端证书和私钥必须同时配置");
+                return;
+            }
         }
 
         if (_isNew)

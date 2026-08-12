@@ -2,6 +2,8 @@
 
 > A lightweight container & reverse proxy management panel.
 
+> 状态说明（2026-08-13）：本文保留早期范围分析和参考项目取舍。当前实现已超出首版范围，包含 TCP/UDP、Compose、Docker Label、DNS-01/通配符、多节点 HTTPS/mTLS、通知和回滚；实际能力、部署方式与上线门禁以 `README.md`、`AGENTS.md` 和 `docs/PRODUCTION-CHECKLIST.md` 为准。OIDC 仍仅为配置草稿。
+
 当前仓库已完成 MVP 开发，正式名称为 NCPM。
 
 ## 项目定位

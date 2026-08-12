@@ -14,6 +14,7 @@ public class AclService
     {
         _configService = configService;
         _logger = logger;
+        _configService.OnConfigChanged += ClearCache;
     }
 
     public bool IsAllowed(IPAddress clientIp)

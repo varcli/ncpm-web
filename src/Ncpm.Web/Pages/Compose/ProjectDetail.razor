@@ -24,7 +24,7 @@ else
     @if (!Project.IsManaged)
     {
         <Alert Type="@AlertType.Info" ShowIcon="true" Message="外部应用栈"
-               Description="此应用栈由容器标签发现，面板不持有其 compose 文件，仅支持生命周期操作。如需编辑请转为托管。" />
+               Description="此应用栈由容器标签发现。compose 文件不可访问时，面板会通过 Docker API 启停、重启、拉取镜像并读取现有容器日志；不会创建缺失服务或修改编排定义。" />
     }
     @if (ComposeService.HasBindMountCaveat)
     {
@@ -141,39 +141,37 @@ else
 
     protected override async Task OnInitializedAsync()
     {
-        await Refresh();
-
         var isNew = New == "1";
         var hostId = Host;
 
-        if (isNew && Project != null && Project.IsManaged)
+        if (isNew)
         {
-            // Seed an empty stack with a minimal template so the editor is not blank.
             _configContent = """
                 services:
                   app:
                     image: hello-world
                 """;
-        }
-        else if (Project != null && Project.IsManaged)
-        {
-            var content = await ComposeService.ReadStackFileAsync(Name);
-            _configContent = content ?? string.Empty;
-        }
 
-        if (isNew && !string.IsNullOrEmpty(hostId) && Project != null && !Project.IsManaged)
-        {
-            // A brand-new managed stack: save the template so it exists on disk.
-            var result = await ComposeService.SaveStackFileAsync(Name, _configContent, hostId);
-            if (result.Success)
+            var existing = await ComposeService.GetProjectAsync(Name, hostId);
+            if (existing == null)
             {
-                Message.Success("应用栈已创建，请编辑 compose 配置");
-                await Refresh();
+                var result = await ComposeService.SaveStackFileAsync(Name, _configContent, hostId);
+                if (result.Success)
+                    Message.Success("应用栈已创建，请编辑 compose 配置");
+                else
+                    Message.Error($"创建失败: {result.Output}");
             }
             else
             {
-                Message.Error($"创建失败: {result.Output}");
+                Message.Warning("同名应用栈已存在，已打开现有项目");
             }
+        }
+
+        await Refresh();
+        if (Project != null && Project.IsManaged)
+        {
+            var content = await ComposeService.ReadStackFileAsync(Name);
+            _configContent = content ?? _configContent;
         }
     }
 
@@ -182,7 +180,7 @@ else
         _loading = true;
         try
         {
-            Project = await ComposeService.GetProjectAsync(Name);
+            Project = await ComposeService.GetProjectAsync(Name, Host);
         }
         catch (Exception ex)
         {
@@ -211,8 +209,7 @@ else
 
     private async Task ValidateConfig()
     {
-        // Validate without persisting by writing to the candidate path the service uses.
-        var result = await ComposeService.SaveStackFileAsync(Name, _configContent, Project?.HostId);
+        var result = await ComposeService.ValidateStackFileAsync(Name, _configContent, Project?.HostId);
         if (result.Success)
         {
             Message.Success("配置校验通过");
@@ -228,15 +225,18 @@ else
     {
         ComposeCommandResult result = verb switch
         {
-            "up" => await ComposeService.UpAsync(Name),
-            "down" => await ComposeService.DownAsync(Name),
-            "restart" => await ComposeService.RestartAsync(Name),
-            "pull" => await ComposeService.PullAsync(Name),
+            "up" => await ComposeService.UpAsync(Name, hostId: Project?.HostId ?? Host),
+            "down" => await ComposeService.DownAsync(Name, hostId: Project?.HostId ?? Host),
+            "restart" => await ComposeService.RestartAsync(Name, hostId: Project?.HostId ?? Host),
+            "pull" => await ComposeService.PullAsync(Name, hostId: Project?.HostId ?? Host),
             _ => new ComposeCommandResult { Success = false, Output = "未知操作" }
         };
 
         _commandOutput = $"$ docker compose {verb}\n\n{result.Output}";
-        Message.Success(result.Success ? "操作完成" : "操作失败");
+        if (result.Success)
+            Message.Success("操作完成");
+        else
+            Message.Error($"操作失败: {result.Output}");
         await Refresh();
     }
 
@@ -244,20 +244,23 @@ else
     {
         ComposeCommandResult result = verb switch
         {
-            "start" => await ComposeService.StartAsync(Name, service),
-            "stop" => await ComposeService.StopAsync(Name, service),
-            "restart" => await ComposeService.RestartAsync(Name, service),
+            "start" => await ComposeService.StartAsync(Name, service, hostId: Project?.HostId ?? Host),
+            "stop" => await ComposeService.StopAsync(Name, service, hostId: Project?.HostId ?? Host),
+            "restart" => await ComposeService.RestartAsync(Name, service, hostId: Project?.HostId ?? Host),
             _ => new ComposeCommandResult { Success = false, Output = "未知操作" }
         };
 
         _commandOutput = $"$ docker compose {verb} {service}\n\n{result.Output}";
-        Message.Success(result.Success ? "操作完成" : "操作失败");
+        if (result.Success)
+            Message.Success("操作完成");
+        else
+            Message.Error($"操作失败: {result.Output}");
         await Refresh();
     }
 
     private async Task LoadLogs()
     {
-        var result = await ComposeService.LogsAsync(Name, _logsService, 200);
+        var result = await ComposeService.LogsAsync(Name, _logsService, 200, hostId: Project?.HostId ?? Host);
         _logsContent = result.Output;
     }
 

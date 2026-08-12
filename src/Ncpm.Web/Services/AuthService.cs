@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
+using System.Text;
 using Ncpm.Data;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -9,12 +10,14 @@ namespace Ncpm.Services;
 public class AuthService : IDisposable
 {
     private static readonly TimeSpan TokenCleanupInterval = TimeSpan.FromMinutes(5);
+    public const int MinimumPasswordLength = 12;
 
     private readonly ConfigService _configService;
     private readonly ILogger<AuthService> _logger;
     private readonly ConcurrentDictionary<string, AuthToken> _activeTokens = new();
     private readonly string _usersFilePath;
     private readonly string _sessionsFilePath;
+    private readonly string _initialPasswordFilePath;
     private readonly object _usersLock = new();
     private List<User> _users = new();
     private readonly ISerializer _serializer;
@@ -28,6 +31,7 @@ public class AuthService : IDisposable
         _logger = logger;
         _usersFilePath = Path.Combine(configService.ConfigPath, "users.yml");
         _sessionsFilePath = Path.Combine(configService.SecretsPath, "sessions.yml");
+        _initialPasswordFilePath = Path.Combine(configService.SecretsPath, "initial-admin-password");
 
         _serializer = new SerializerBuilder()
             .WithNamingConvention(CamelCaseNamingConvention.Instance)
@@ -39,6 +43,7 @@ public class AuthService : IDisposable
             .Build();
 
         LoadUsers();
+        MarkLegacyDefaultPasswordForChange();
         EnsureDefaultAdmin();
         LoadSessions();
 
@@ -78,8 +83,7 @@ public class AuthService : IDisposable
                 Directory.CreateDirectory(dir);
             }
 
-            var content = _serializer.Serialize(_users);
-            File.WriteAllText(_usersFilePath, content);
+            WriteFileAtomically(_usersFilePath, _serializer.Serialize(_users), restrictToOwner: true);
         }
         catch (Exception ex)
         {
@@ -102,8 +106,15 @@ public class AuthService : IDisposable
             var tokens = _deserializer.Deserialize<List<AuthToken>>(content) ?? new List<AuthToken>();
 
             var restored = 0;
+            var migrated = false;
             foreach (var token in tokens.Where(t => !t.IsExpired && !string.IsNullOrEmpty(t.Token)))
             {
+                if (!IsTokenHash(token.Token))
+                {
+                    token.Token = HashToken(token.Token);
+                    migrated = true;
+                }
+
                 _activeTokens[token.Token] = token;
                 restored++;
             }
@@ -114,7 +125,7 @@ public class AuthService : IDisposable
             }
 
             // Drop anything that expired while the panel was down.
-            if (restored != tokens.Count)
+            if (restored != tokens.Count || migrated)
             {
                 SaveSessions();
             }
@@ -136,7 +147,7 @@ public class AuthService : IDisposable
             }
 
             var tokens = _activeTokens.Values.Where(t => !t.IsExpired).ToList();
-            File.WriteAllText(_sessionsFilePath, _serializer.Serialize(tokens));
+            WriteFileAtomically(_sessionsFilePath, _serializer.Serialize(tokens), restrictToOwner: true);
         }
         catch (Exception ex)
         {
@@ -149,25 +160,70 @@ public class AuthService : IDisposable
         if (_users.Any())
             return;
 
-        _logger.LogInformation("Creating default admin user");
-        var (hash, salt) = PasswordHelper.HashPassword("admin123");
+        var username = Environment.GetEnvironmentVariable("NCPM_ADMIN_USERNAME")?.Trim();
+        if (string.IsNullOrWhiteSpace(username))
+            username = "admin";
+
+        var configuredPassword = ReadBootstrapPassword();
+        var generatedPassword = string.IsNullOrWhiteSpace(configuredPassword);
+        var password = generatedPassword ? GenerateBootstrapPassword() : configuredPassword!;
+        ValidatePassword(password);
+
+        _logger.LogInformation("Creating initial administrator {Username}", username);
+        var (hash, salt) = PasswordHelper.HashPassword(password);
 
         var admin = new User
         {
             Id = Guid.NewGuid().ToString("N")[..8],
-            Username = "admin",
+            Username = username,
             PasswordHash = hash,
             PasswordSalt = salt,
             DisplayName = "Administrator",
             Email = "admin@localhost",
             Role = UserRole.Admin,
             IsActive = true,
+            MustChangePassword = true,
             CreatedAt = DateTime.UtcNow
         };
 
         _users.Add(admin);
         SaveUsers();
-        _logger.LogWarning("Default admin user created with password 'admin123'. Please change it immediately!");
+
+        if (generatedPassword)
+        {
+            WriteFileAtomically(
+                _initialPasswordFilePath,
+                $"username: {username}{Environment.NewLine}password: {password}{Environment.NewLine}",
+                restrictToOwner: true);
+            _logger.LogCritical(
+                "Initial administrator password was generated. Read it from {Path}, sign in, then change it immediately.",
+                _initialPasswordFilePath);
+        }
+        else
+        {
+            _logger.LogWarning(
+                "Initial administrator {Username} was created from NCPM_ADMIN_PASSWORD and must change the password after sign-in.",
+                username);
+        }
+    }
+
+    private void MarkLegacyDefaultPasswordForChange()
+    {
+        var changed = false;
+        foreach (var user in _users.Where(user =>
+                     user.Username.Equals("admin", StringComparison.OrdinalIgnoreCase)
+                     && PasswordHelper.VerifyPassword("admin123", user.PasswordHash, user.PasswordSalt)))
+        {
+            user.MustChangePassword = true;
+            changed = true;
+        }
+
+        if (changed)
+        {
+            SaveUsers();
+            _logger.LogCritical(
+                "Legacy default administrator password detected. The account must change its password before normal use.");
+        }
     }
 
     public LoginResult Login(LoginRequest request)
@@ -225,8 +281,8 @@ public class AuthService : IDisposable
         SaveUsers();
 
         // Generate token
-        var token = GenerateToken(user);
-        _activeTokens[token.Token] = token;
+        var (rawToken, session) = GenerateToken(user);
+        _activeTokens[session.Token] = session;
         SaveSessions();
 
         _logger.LogInformation("User {Username} logged in successfully", request.Username);
@@ -234,14 +290,14 @@ public class AuthService : IDisposable
         return new LoginResult
         {
             Success = true,
-            Token = token.Token,
+            Token = rawToken,
             User = user
         };
     }
 
     public void Logout(string token)
     {
-        if (_activeTokens.TryRemove(token, out var removed))
+        if (_activeTokens.TryRemove(HashToken(token), out var removed))
         {
             SaveSessions();
             _logger.LogInformation("User {Username} logged out", removed.Username);
@@ -250,12 +306,13 @@ public class AuthService : IDisposable
 
     public AuthToken? ValidateToken(string token)
     {
-        if (!_activeTokens.TryGetValue(token, out var authToken))
+        var tokenHash = HashToken(token);
+        if (!_activeTokens.TryGetValue(tokenHash, out var authToken))
             return null;
 
         if (authToken.IsExpired)
         {
-            _activeTokens.TryRemove(token, out _);
+            _activeTokens.TryRemove(tokenHash, out _);
             return null;
         }
 
@@ -289,6 +346,7 @@ public class AuthService : IDisposable
 
     public bool CreateUser(User user, string password)
     {
+        ValidatePassword(password);
         lock (_usersLock)
         {
             if (_users.Any(u => u.Username.Equals(user.Username, StringComparison.OrdinalIgnoreCase)))
@@ -327,6 +385,7 @@ public class AuthService : IDisposable
 
     public bool ChangePassword(string userId, string newPassword)
     {
+        ValidatePassword(newPassword);
         lock (_usersLock)
         {
             var user = _users.FirstOrDefault(u => u.Id == userId);
@@ -336,10 +395,58 @@ public class AuthService : IDisposable
             var (hash, salt) = PasswordHelper.HashPassword(newPassword);
             user.PasswordHash = hash;
             user.PasswordSalt = salt;
+            user.MustChangePassword = false;
             SaveUsers();
 
             // A password change must not leave older sessions usable.
             RevokeSessionsForUser(userId);
+            TryDeleteInitialPasswordFile();
+            return true;
+        }
+    }
+
+    public bool ChangeOwnPassword(string userId, string currentPassword, string newPassword, out string? error)
+    {
+        error = null;
+        try
+        {
+            ValidatePassword(newPassword);
+        }
+        catch (ArgumentException ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+
+        lock (_usersLock)
+        {
+            var user = _users.FirstOrDefault(u => u.Id == userId && u.IsActive);
+            if (user == null)
+            {
+                error = "用户不存在或已停用";
+                return false;
+            }
+
+            if (!PasswordHelper.VerifyPassword(currentPassword, user.PasswordHash, user.PasswordSalt))
+            {
+                error = "当前密码不正确";
+                return false;
+            }
+
+            if (PasswordHelper.VerifyPassword(newPassword, user.PasswordHash, user.PasswordSalt))
+            {
+                error = "新密码不能与当前密码相同";
+                return false;
+            }
+
+            var (hash, salt) = PasswordHelper.HashPassword(newPassword);
+            user.PasswordHash = hash;
+            user.PasswordSalt = salt;
+            user.MustChangePassword = false;
+            SaveUsers();
+            RevokeSessionsForUser(userId);
+            TryDeleteInitialPasswordFile();
+            _logger.LogInformation("User {Username} changed their password", user.Username);
             return true;
         }
     }
@@ -379,22 +486,35 @@ public class AuthService : IDisposable
         }
     }
 
-    private AuthToken GenerateToken(User user)
+    private (string RawToken, AuthToken Session) GenerateToken(User user)
     {
         var tokenBytes = new byte[32];
         using var rng = RandomNumberGenerator.Create();
         rng.GetBytes(tokenBytes);
+        var rawToken = Convert.ToBase64String(tokenBytes);
 
         var config = _configService.LoadAppConfig();
-        
-        return new AuthToken
+
+        return (rawToken, new AuthToken
         {
-            Token = Convert.ToBase64String(tokenBytes),
+            // Persist only a one-way digest. The raw bearer token is returned to
+            // the browser once and is never written to sessions.yml.
+            Token = HashToken(rawToken),
             UserId = user.Id,
             Username = user.Username,
             Role = user.Role,
             ExpiresAt = DateTime.UtcNow.AddSeconds(config.Security.SessionTimeout)
-        };
+        });
+    }
+
+    private static bool IsTokenHash(string token) =>
+        token.StartsWith("sha256:", StringComparison.Ordinal)
+        && token.Length == 71;
+
+    private static string HashToken(string token)
+    {
+        var digest = SHA256.HashData(Encoding.UTF8.GetBytes(token));
+        return $"sha256:{Convert.ToHexString(digest).ToLowerInvariant()}";
     }
 
     public void CleanupExpiredTokens()
@@ -414,6 +534,110 @@ public class AuthService : IDisposable
 
         SaveSessions();
         _logger.LogDebug("Cleaned up {Count} expired token(s)", expiredTokens.Count);
+    }
+
+    public static void ValidatePassword(string password)
+    {
+        if (string.IsNullOrWhiteSpace(password) || password.Length < MinimumPasswordLength)
+            throw new ArgumentException($"密码至少需要 {MinimumPasswordLength} 个字符");
+        if (!password.Any(char.IsUpper)
+            || !password.Any(char.IsLower)
+            || !password.Any(char.IsDigit)
+            || !password.Any(character => !char.IsLetterOrDigit(character)))
+        {
+            throw new ArgumentException("密码必须同时包含大写字母、小写字母、数字和特殊字符");
+        }
+    }
+
+    private static string GenerateBootstrapPassword()
+    {
+        const string upper = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+        const string lower = "abcdefghijkmnopqrstuvwxyz";
+        const string digits = "23456789";
+        const string symbols = "!@#$%*-_=+";
+        const string all = upper + lower + digits + symbols;
+
+        var characters = new List<char>
+        {
+            upper[RandomNumberGenerator.GetInt32(upper.Length)],
+            lower[RandomNumberGenerator.GetInt32(lower.Length)],
+            digits[RandomNumberGenerator.GetInt32(digits.Length)],
+            symbols[RandomNumberGenerator.GetInt32(symbols.Length)]
+        };
+        while (characters.Count < 24)
+            characters.Add(all[RandomNumberGenerator.GetInt32(all.Length)]);
+
+        for (var i = characters.Count - 1; i > 0; i--)
+        {
+            var j = RandomNumberGenerator.GetInt32(i + 1);
+            (characters[i], characters[j]) = (characters[j], characters[i]);
+        }
+
+        return new string(characters.ToArray());
+    }
+
+    private static string? ReadBootstrapPassword()
+    {
+        var passwordFile = Environment.GetEnvironmentVariable("NCPM_ADMIN_PASSWORD_FILE")?.Trim();
+        if (!string.IsNullOrWhiteSpace(passwordFile))
+        {
+            if (!File.Exists(passwordFile))
+                throw new FileNotFoundException("NCPM_ADMIN_PASSWORD_FILE does not exist", passwordFile);
+            return File.ReadAllText(passwordFile).TrimEnd('\r', '\n');
+        }
+
+        return Environment.GetEnvironmentVariable("NCPM_ADMIN_PASSWORD");
+    }
+
+    private static void WriteFileAtomically(string path, string content, bool restrictToOwner)
+    {
+        var directory = Path.GetDirectoryName(path);
+        if (!string.IsNullOrWhiteSpace(directory))
+            Directory.CreateDirectory(directory);
+
+        var temp = path + $".{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(temp, content);
+            if (restrictToOwner)
+                RestrictFileToOwner(temp);
+            File.Move(temp, path, overwrite: true);
+            if (restrictToOwner)
+                RestrictFileToOwner(path);
+        }
+        finally
+        {
+            if (File.Exists(temp))
+                File.Delete(temp);
+        }
+    }
+
+    private static void RestrictFileToOwner(string path)
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        try
+        {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+        catch
+        {
+            // Bind-mounted filesystems may not expose Unix permission changes.
+        }
+    }
+
+    private void TryDeleteInitialPasswordFile()
+    {
+        try
+        {
+            if (File.Exists(_initialPasswordFilePath))
+                File.Delete(_initialPasswordFilePath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Unable to remove the initial password file {Path}", _initialPasswordFilePath);
+        }
     }
 
     public void Dispose()

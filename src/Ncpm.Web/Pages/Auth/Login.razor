@@ -8,6 +8,7 @@
 @inject IMessageService Message
 @inject ILocalStorageService LocalStorage
 @inject AuthenticationStateProvider AuthStateProvider
+@inject Ncpm.Services.ConfigService ConfigService
 
 <div style="display: flex; justify-content: center; align-items: center; min-height: 100vh; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
     <Card Style="width: 400px; box-shadow: 0 8px 32px rgba(0,0,0,0.1);">
@@ -40,22 +41,24 @@
             </FormItem>
         </Form>
 
-        @if (_showDefaultCredentials)
-        {
-            <Alert Type="@AlertType.Warning"
-                   ShowIcon="true"
-                   Message="默认凭据"
-                   Description="用户名: admin，密码: admin123。请尽快修改！" />
-        }
+        <Alert Type="@AlertType.Info"
+               ShowIcon="true"
+               Message="首次登录"
+               Description="初始账号由 NCPM_ADMIN_USERNAME/NCPM_ADMIN_PASSWORD 设置；未设置密码时，请从 data/secrets/initial-admin-password 读取一次性初始凭据。" />
     </Card>
 </div>
 
 @code {
     private LoginRequest _loginRequest = new();
     private bool _loading;
-    private bool _showDefaultCredentials = true;
     private RenderFragment _userIcon =@<Icon Type="user" />;
     private RenderFragment _lockIcon =@<Icon Type="lock" />;
+
+    protected override void OnInitialized()
+    {
+        if (!ConfigService.LoadAppConfig().Security.RequireAuth)
+            Navigation.NavigateTo("/", forceLoad: true);
+    }
 
     private async Task HandleLogin()
     {
@@ -78,7 +81,7 @@
                 ((AuthStateProvider)AuthStateProvider).NotifyUserAuthentication(result.Token!);
 
                 Message.Success("登录成功");
-                Navigation.NavigateTo("/");
+                Navigation.NavigateTo(result.User.MustChangePassword ? "/settings/account" : "/");
             }
             else
             {
