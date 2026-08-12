@@ -1,0 +1,168 @@
+@page "/nginx/snapshots"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@inject NginxSnapshotService SnapshotService
+@inject NginxService NginxService
+@inject IMessageService Message
+
+<PageHeader Title="Nginx 配置快照" Subtitle="备份与回滚整个 nginx 配置树" />
+
+<Alert Type="@AlertType.Info" ShowIcon="true" Style="margin-bottom: 16px;"
+       Message="快照包含 active 与 stream 目录下的全部 .conf 文件"
+       Description="每次发布代理配置前会自动创建快照。此处可手动创建、回滚或删除快照。回滚后会用 nginx -t 校验并 reload，失败则自动恢复原配置。" />
+
+<div Style="margin-bottom: 16px;">
+    <Button Type="@ButtonType.Primary" Icon="@IconType.Outline.Camera" OnClick="CreateSnapshot" Loading="@_creating">创建快照</Button>
+    <Button Icon="@IconType.Outline.Reload" OnClick="Load" Style="margin-left: 8px;">刷新</Button>
+</div>
+
+<Table TItem="NginxSnapshot" DataSource="@_snapshots" RowKey="x => x.Id" Loading="@_loading">
+    <PropertyColumn Property="x => x.Id" Title="快照 ID" Width="180">
+        <Text Style="font-family: monospace;">@context.Id</Text>
+    </PropertyColumn>
+    <PropertyColumn Property="x => x.CreatedAt" Title="创建时间" Format="yyyy-MM-dd HH:mm:ss" Width="180" />
+    <PropertyColumn Property="x => x.Reason" Title="来源">
+        @if (string.IsNullOrEmpty(context.Reason))
+        {
+            <Tag>手动</Tag>
+        }
+        else
+        {
+            <Tag Color="@("blue")">@context.Reason</Tag>
+        }
+    </PropertyColumn>
+    <PropertyColumn Property="x => x.Files.Count" Title="文件数" Width="80" />
+    <ActionColumn Title="操作" Width="220">
+        <Space>
+            <SpaceItem>
+                <Button Size="@ButtonSize.Small" OnClick="() => ShowFiles(context)">查看文件</Button>
+            </SpaceItem>
+            <SpaceItem>
+                <Popconfirm Title="确定回滚到此快照？会先校验配置，失败自动恢复。" OnConfirm="() => Restore(context)">
+                    <Button Size="@ButtonSize.Small" Type="@ButtonType.Primary" Danger>回滚</Button>
+                </Popconfirm>
+            </SpaceItem>
+            <SpaceItem>
+                <Popconfirm Title="确定删除此快照？" OnConfirm="() => Delete(context)">
+                    <Button Size="@ButtonSize.Small" Danger Icon="@IconType.Outline.Delete">删除</Button>
+                </Popconfirm>
+            </SpaceItem>
+        </Space>
+    </ActionColumn>
+</Table>
+
+@if (!_snapshots.Any() && !_loading)
+{
+    <Empty Description="@("暂无快照，点击「创建快照」生成第一份备份")" Style="margin-top: 32px;" />
+}
+
+<Modal Title="@($"快照 {_activeSnapshot?.Id ?? ""} 的文件")" Visible="@_filesVisible"
+       OnCancel="() => _filesVisible = false" OnOk="() => _filesVisible = false"
+       Width="640">
+    @if (_activeSnapshot != null)
+    {
+        <div Style="max-height: 50vh; overflow: auto;">
+            @foreach (var f in _activeSnapshot.Files)
+            {
+                <div Style="display: flex; align-items: center; padding: 6px 0; border-bottom: 1px solid rgba(0,0,0,0.06);">
+                    <Icon Type="file-text" Theme="@IconThemeType.Outline" />
+                    <span Style="margin-left: 8px; font-family: monospace; font-size: 13px;">@f.RelativePath</span>
+                    <span Style="margin-left: auto; color: rgba(0,0,0,0.45);">@FormatSize(f.Size)</span>
+                </div>
+            }
+            @if (!_activeSnapshot.Files.Any())
+            {
+                <Empty Description="@("快照中无文件")" />
+            }
+        </div>
+    }
+</Modal>
+
+@code {
+    private List<NginxSnapshot> _snapshots = new();
+    private bool _loading = true;
+    private bool _creating;
+
+    private bool _filesVisible;
+    private NginxSnapshot? _activeSnapshot;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Load();
+    }
+
+    private async Task Load()
+    {
+        _loading = true;
+        await Task.Run(() => _snapshots = SnapshotService.List());
+        _loading = false;
+    }
+
+    private async Task CreateSnapshot()
+    {
+        _creating = true;
+        try
+        {
+            var snap = await SnapshotService.CreateAsync("手动创建");
+            if (snap != null)
+            {
+                Message.Success($"已创建快照 {snap.Id}");
+                await Load();
+            }
+            else
+            {
+                Message.Warning("没有可备份的配置文件（active 与 stream 目录均为空）");
+            }
+        }
+        finally
+        {
+            _creating = false;
+        }
+    }
+
+    private void ShowFiles(NginxSnapshot snapshot)
+    {
+        _activeSnapshot = snapshot;
+        _filesVisible = true;
+    }
+
+    private async Task Restore(NginxSnapshot snapshot)
+    {
+        if (await SnapshotService.RestoreAsync(snapshot.Id))
+        {
+            // Validate the restored tree before committing with a reload.
+            if (await NginxService.ValidateConfigAsync())
+            {
+                await NginxService.ReloadAsync();
+                Message.Success($"已回滚到快照 {snapshot.Id} 并 reload");
+                await Load();
+            }
+            else
+            {
+                Message.Error($"回滚后校验失败：{NginxService.LastError}。请检查快照文件或手动修复。");
+            }
+        }
+        else
+        {
+            Message.Error("回滚失败，请查看日志");
+        }
+    }
+
+    private async Task Delete(NginxSnapshot snapshot)
+    {
+        if (SnapshotService.Delete(snapshot.Id))
+        {
+            Message.Success("已删除快照");
+            await Load();
+        }
+        else
+        {
+            Message.Error("删除失败");
+        }
+    }
+
+    private static string FormatSize(long bytes) =>
+        bytes < 1024 ? $"{bytes} B" : $"{bytes / 1024.0:F1} KB";
+}

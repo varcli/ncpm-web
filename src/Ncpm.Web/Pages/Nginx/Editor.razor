@@ -1,0 +1,113 @@
+@page "/nginx/editor"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@inject NginxService NginxService
+@inject IMessageService Message
+
+<PageHeader Title="Nginx 原始配置" Subtitle="直接编辑 nginx 配置文件">
+    <PageHeaderExtra>
+        <Button Icon="@IconType.Outline.Reload" OnClick="RefreshFiles">刷新</Button>
+    </PageHeaderExtra>
+</PageHeader>
+
+<Alert Type="@AlertType.Warning" ShowIcon="true" Style="margin-bottom: 16px;"
+       Message="保存前会自动校验"
+       Description="保存时先用 nginx -t 校验整个配置树，校验通过才会落盘并 reload；失败则回滚到原内容，配置不会损坏。" />
+
+<Row Gutter="16">
+    <AntDesign.Col Span="8">
+        <Card Title="配置文件" Size="@CardSize.Small">
+            <div Style="max-height: 600px; overflow: auto;">
+                @foreach (var file in _files)
+                {
+                    <div @onclick="() => SelectFile(file)" style="cursor: pointer; padding: 6px 4px; @(file.Path == _selectedFile ? "color: #1890ff; font-weight: 600;" : "")">
+                        <Icon Type="file" Theme="@IconThemeType.Outline" />
+                        <span style="margin-left: 8px; font-family: monospace; font-size: 13px;">@file.RelativePath</span>
+                    </div>
+                }
+                @if (!_files.Any())
+                {
+                    <Empty Description="@("未发现配置文件")" />
+                }
+            </div>
+        </Card>
+    </AntDesign.Col>
+    <AntDesign.Col Span="16">
+        <Card Title="@(_selectedFile ?? "选择左侧文件编辑")" Size="@CardSize.Small">
+            @if (_selectedFile != null)
+            {
+                <div Style="margin-bottom: 8px; display: flex; gap: 8px;">
+                    <Button Type="@ButtonType.Primary" OnClick="Save" Loading="@_saving">保存并 reload</Button>
+                    <Button OnClick="ValidateOnly">仅校验</Button>
+                </div>
+                <TextArea Rows="28" @bind-Value="@_content"
+                          Style="font-family: monospace; font-size: 13px;"
+                          Placeholder="# nginx 配置" />
+            }
+            else
+            {
+                <Empty Description="@("点击左侧文件开始编辑")" />
+            }
+        </Card>
+    </AntDesign.Col>
+</Row>
+
+@code {
+    private List<NginxConfigFile> _files = new();
+    private string? _selectedFile;
+    private string _content = string.Empty;
+    private bool _saving;
+
+    protected override void OnInitialized()
+    {
+        RefreshFiles();
+    }
+
+    private void RefreshFiles()
+    {
+        _files = NginxService.ListConfigFiles();
+    }
+
+    private async Task SelectFile(NginxConfigFile file)
+    {
+        _selectedFile = file.Path;
+        _content = await NginxService.ReadRawConfigAsync(file.Path) ?? string.Empty;
+    }
+
+    private async Task Save()
+    {
+        if (_selectedFile == null)
+            return;
+
+        _saving = true;
+        try
+        {
+            if (await NginxService.SaveRawConfigAsync(_selectedFile, _content))
+            {
+                Message.Success("配置已保存并 reload");
+            }
+            else
+            {
+                Message.Error($"保存失败: {NginxService.LastError}");
+            }
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task ValidateOnly()
+    {
+        if (await NginxService.ValidateConfigAsync())
+        {
+            Message.Success("配置校验通过");
+        }
+        else
+        {
+            Message.Error($"校验失败: {NginxService.LastError}");
+        }
+    }
+}

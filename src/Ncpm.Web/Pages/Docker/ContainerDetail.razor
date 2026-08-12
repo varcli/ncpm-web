@@ -123,6 +123,19 @@
                     }
                 </Card>
             </TabPane>
+
+            <TabPane Key="console" Tab="命令执行">
+                <Card Style="margin-top: 16px;">
+                    <Alert Type="@AlertType.Info" ShowIcon="true" Style="margin-bottom: 12px;"
+                           Message="非交互式执行"
+                           Description="每次提交一条命令，在容器内执行并返回输出。不支持持续交互的 shell、vim 等需要 TTY 的程序。" />
+                    <div style="margin-bottom: 12px; display: flex; gap: 8px;">
+                        <Input @bind-Value="@_execCommand" Placeholder="ls -la /app" OnPressEnter="OnExecInput" Style="flex: 1;" />
+                        <Button Type="@ButtonType.Primary" OnClick="RunExec" Loading="@_execRunning">执行</Button>
+                    </div>
+                    <pre style="background: #1e1e1e; color: #d4d4d4; padding: 16px; border-radius: 4px; max-height: 400px; overflow: auto; font-size: 13px;">@(_execOutput ?? "执行命令后输出将显示在此")</pre>
+                </Card>
+            </TabPane>
         </Tabs>
     }
     else if (!_loading)
@@ -153,6 +166,9 @@
     private List<ContainerLogEntry> _logs = new();
     private ContainerStatsInfo? _stats;
     private int _logTail = 100;
+    private string _execCommand = string.Empty;
+    private string? _execOutput;
+    private bool _execRunning;
 
     protected override async Task OnInitializedAsync()
     {
@@ -272,6 +288,32 @@
         else
         {
             Message.Error("重启容器失败");
+        }
+    }
+
+    // OnPressEnter only fires on Enter, so no key check is needed here.
+    private Task OnExecInput(KeyboardEventArgs e) => RunExec();
+
+    private async Task RunExec()
+    {
+        if (_container == null || string.IsNullOrWhiteSpace(_execCommand))
+            return;
+
+        _execRunning = true;
+        try
+        {
+            var result = await DockerService.ExecAsync(ContainerId, _container.HostId, _execCommand);
+            _execOutput = $"$ {_execCommand}\n{(result.Success ? "" : $"[exit {result.ExitCode}] ")}{result.Output}";
+            if (!result.Success && !string.IsNullOrEmpty(result.Error))
+                _execOutput += $"\n错误: {result.Error}";
+        }
+        catch (Exception ex)
+        {
+            _execOutput = $"执行失败: {ex.Message}";
+        }
+        finally
+        {
+            _execRunning = false;
         }
     }
 }

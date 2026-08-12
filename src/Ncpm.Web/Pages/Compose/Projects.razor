@@ -1,0 +1,246 @@
+@page "/compose"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@inject ComposeService ComposeService
+@inject DockerService DockerService
+@inject IMessageService Message
+@inject NavigationManager Navigation
+
+<PageHeader Title="Compose 编排" Subtitle="管理 Docker Compose 应用栈">
+    <PageHeaderExtra>
+        <Select @bind-Value="@_selectedHostId"
+                TItem="string"
+                TItemValue="string"
+                Placeholder="全部主机"
+                Style="width: 200px; margin-right: 8px;"
+                AllowClear>
+            <SelectOptions>
+                @foreach (var host in _hosts)
+                {
+                    <SelectOption TItem="string" TItemValue="string" Value="@host.Id" Label="@host.Name" />
+                }
+            </SelectOptions>
+        </Select>
+        <Button Type="@ButtonType.Primary" Icon="@IconType.Outline.Plus" OnClick="OpenCreate">新建应用栈</Button>
+        <Button Icon="@IconType.Outline.Reload" OnClick="Refresh">刷新</Button>
+    </PageHeaderExtra>
+</PageHeader>
+
+@if (_composeUnavailable)
+{
+    <Alert Type="@AlertType.Warning" ShowIcon="true" Message="未检测到 docker compose 插件"
+           Description="面板容器内需要安装 docker-ce-cli 与 docker-compose-plugin 才能编排应用栈。请更新镜像后重试。" />
+}
+
+<Spin Spinning="@_loading">
+    <Table TItem="ComposeProject" DataSource="@_projects" RowKey="x => x.Name">
+        <PropertyColumn Property="p => p.Name" Title="项目">
+            <a @onclick="() => NavigateToDetail(context.Name)" style="cursor: pointer;">
+                @context.Name
+            </a>
+            @if (context.IsManaged)
+            {
+                <Tag Color="@("blue")" Style="margin-left: 8px;">托管</Tag>
+            }
+            else
+            {
+                <Tag Style="margin-left: 8px;">外部</Tag>
+            }
+        </PropertyColumn>
+        <PropertyColumn Property="p => p.HostName" Title="主机" Width="120">
+            <Tag>@context.HostName</Tag>
+        </PropertyColumn>
+        <PropertyColumn Property="p => p.Status" Title="状态" Width="100">
+            <Tag Color="@(StatusColor(context.Status))">
+                @StatusText(context.Status)
+            </Tag>
+        </PropertyColumn>
+        <PropertyColumn Property="p => p.ServiceCount" Title="服务数" Width="80">
+            @context.RunningCount / @context.ServiceCount
+        </PropertyColumn>
+        <PropertyColumn Property="p => p.Services" Title="服务">
+            @foreach (var svc in context.Services.Take(4))
+            {
+                <Tag Color="@(svc.IsRunning ? "green" : "default")">@svc.Name</Tag>
+            }
+            @if (context.Services.Count > 4)
+            {
+                <Tag>+@(context.Services.Count - 4)</Tag>
+            }
+        </PropertyColumn>
+        <PropertyColumn Property="p => p.UpdatedAt" Title="更新时间" Width="160">
+            @(context.UpdatedAt.HasValue ? context.UpdatedAt.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm") : "-")
+        </PropertyColumn>
+        <ActionColumn Title="操作" Width="280">
+            <Space>
+                <SpaceItem>
+                    <Button Size="@ButtonSize.Small" OnClick="() => NavigateToDetail(context.Name)">详情</Button>
+                </SpaceItem>
+                <SpaceItem>
+                    <Button Size="@ButtonSize.Small" Type="@ButtonType.Primary" OnClick="() => Up(context.Name)">启动</Button>
+                </SpaceItem>
+                <SpaceItem>
+                    <Popconfirm Title="确定停止此应用栈吗？" OnConfirm="() => Down(context.Name)">
+                        <Button Size="@ButtonSize.Small" Danger>停止</Button>
+                    </Popconfirm>
+                </SpaceItem>
+                @if (context.IsManaged)
+                {
+                    <SpaceItem>
+                        <Popconfirm Title="确定删除此应用栈吗？关联容器将被移除。" OnConfirm="() => Delete(context.Name)">
+                            <Button Size="@ButtonSize.Small" Danger Icon="@IconType.Outline.Delete">删除</Button>
+                        </Popconfirm>
+                    </SpaceItem>
+                }
+            </Space>
+        </ActionColumn>
+    </Table>
+</Spin>
+
+<Modal Title="新建应用栈" @bind-Visible="@_createVisible" Width="600" OnOk="CreateProject" OnCancel="() => _createVisible = false">
+    <Form Model="@this" Layout="@FormLayout.Vertical">
+        <FormItem Label="项目名称">
+            <Input @bind-Value="@_newName" Placeholder="my-app（小写字母、数字、短横线）" />
+        </FormItem>
+        <FormItem Label="目标主机">
+            <Select @bind-Value="@_newHostId" TItem="string" TItemValue="string" Placeholder="默认主机">
+                <SelectOptions>
+                    @foreach (var host in _hosts.Where(h => h.IsEnabled))
+                    {
+                        <SelectOption TItem="string" TItemValue="string" Value="@host.Id" Label="@host.Name" />
+                    }
+                </SelectOptions>
+            </Select>
+        </FormItem>
+        <Alert Type="@AlertType.Info" ShowIcon="true"
+               Message="创建后将跳转到编辑器填写 docker-compose.yml"
+               Description="保存时会先用 docker compose config 校验，校验通过才会落盘。" />
+    </Form>
+</Modal>
+
+@code {
+    private List<ComposeProject> _projects = new();
+    private List<DockerHost> _hosts = new();
+    private bool _loading = true;
+    private bool _composeUnavailable;
+    private string? _selectedHostId;
+
+    private bool _createVisible;
+    private string _newName = string.Empty;
+    private string? _newHostId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _hosts = DockerService.GetAllHosts();
+        await Refresh();
+    }
+
+    private async Task Refresh()
+    {
+        _loading = true;
+        try
+        {
+            _projects = await ComposeService.ListProjectsAsync(_selectedHostId);
+            _composeUnavailable = false;
+        }
+        catch (Exception ex)
+        {
+            // The first call against a stack without the plugin surfaces a clear error.
+            if (ex.Message.Contains("compose", StringComparison.OrdinalIgnoreCase))
+            {
+                _composeUnavailable = true;
+            }
+            else
+            {
+                Message.Error($"加载应用栈失败: {ex.Message}");
+            }
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private void NavigateToDetail(string name)
+    {
+        Navigation.NavigateTo($"/compose/{name}");
+    }
+
+    private async Task Up(string name)
+    {
+        var result = await ComposeService.UpAsync(name);
+        if (result.Success)
+        {
+            Message.Success("应用栈已启动");
+        }
+        else
+        {
+            Message.Error($"启动失败: {result.Output}");
+        }
+        await Refresh();
+    }
+
+    private async Task Down(string name)
+    {
+        var result = await ComposeService.DownAsync(name);
+        if (result.Success)
+        {
+            Message.Success("应用栈已停止");
+        }
+        else
+        {
+            Message.Error($"停止失败: {result.Output}");
+        }
+        await Refresh();
+    }
+
+    private async Task Delete(string name)
+    {
+        var result = await ComposeService.DeleteStackAsync(name);
+        if (result.Success)
+        {
+            Message.Success("应用栈已删除");
+        }
+        else
+        {
+            Message.Error($"删除失败: {result.Output}");
+        }
+        await Refresh();
+    }
+
+    private void OpenCreate()
+    {
+        _newName = string.Empty;
+        _newHostId = _hosts.FirstOrDefault(h => h.IsDefault)?.Id;
+        _createVisible = true;
+    }
+
+    private void CreateProject()
+    {
+        if (!ComposeService.IsValidProjectName(_newName))
+        {
+            Message.Error("项目名只能包含小写字母、数字、下划线和短横线，且以字母或数字开头");
+            return;
+        }
+
+        _createVisible = false;
+        Navigation.NavigateTo($"/compose/{_newName}?new=1&host={_newHostId}");
+    }
+
+    private static string StatusColor(ComposeProjectStatus status) => status switch
+    {
+        ComposeProjectStatus.Running => "green",
+        ComposeProjectStatus.Partial => "orange",
+        _ => "default"
+    };
+
+    private static string StatusText(ComposeProjectStatus status) => status switch
+    {
+        ComposeProjectStatus.Running => "运行中",
+        ComposeProjectStatus.Partial => "部分运行",
+        ComposeProjectStatus.Down => "已停止",
+        _ => "未知"
+    };
+}

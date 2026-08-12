@@ -122,6 +122,85 @@ public class DockerImage
 
 #endregion
 
+#region Compose Models
+
+/// <summary>
+/// Well-known labels Docker Compose stamps onto every container it creates.
+/// Reading these is how externally-managed stacks are discovered.
+/// </summary>
+public static class ComposeLabels
+{
+    public const string Project = "com.docker.compose.project";
+    public const string Service = "com.docker.compose.service";
+    public const string WorkingDir = "com.docker.compose.project.working_dir";
+    public const string ConfigFiles = "com.docker.compose.project.config_files";
+    public const string ContainerNumber = "com.docker.compose.container-number";
+}
+
+public enum ComposeProjectStatus
+{
+    /// <summary>No container of this project exists.</summary>
+    Down,
+    /// <summary>Every service container is running.</summary>
+    Running,
+    /// <summary>Some but not all service containers are running.</summary>
+    Partial
+}
+
+public class ComposeProject
+{
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>Project directory. For managed stacks this is under data/compose.</summary>
+    public string WorkingDir { get; set; } = string.Empty;
+
+    /// <summary>Absolute path of the compose file, when known.</summary>
+    public string? ConfigFile { get; set; }
+
+    /// <summary>
+    /// True when the panel owns the compose file on disk and can edit it.
+    /// False for stacks discovered purely from container labels.
+    /// </summary>
+    public bool IsManaged { get; set; }
+
+    public string HostId { get; set; } = string.Empty;
+    public string HostName { get; set; } = string.Empty;
+    public ComposeProjectStatus Status { get; set; }
+    public List<ComposeServiceInfo> Services { get; set; } = new();
+    public DateTime? UpdatedAt { get; set; }
+
+    public int ServiceCount => Services.Count;
+    public int RunningCount => Services.Count(s => s.IsRunning);
+}
+
+/// <summary>
+/// One service of a compose project, as observed on the daemon. Named
+/// <c>...Info</c> so it does not collide with <c>Ncpm.Services.ComposeService</c>,
+/// which pages import through the same set of usings.
+/// </summary>
+public class ComposeServiceInfo
+{
+    public string Name { get; set; } = string.Empty;
+    public string ContainerId { get; set; } = string.Empty;
+    public string ContainerName { get; set; } = string.Empty;
+    public string Image { get; set; } = string.Empty;
+    public string State { get; set; } = string.Empty;
+    public string? Status { get; set; }
+    public List<PortMapping> Ports { get; set; } = new();
+
+    public bool IsRunning => State.Equals("running", StringComparison.OrdinalIgnoreCase);
+}
+
+/// <summary>Result of one <c>docker compose</c> invocation.</summary>
+public class ComposeCommandResult
+{
+    public bool Success { get; set; }
+    public int ExitCode { get; set; }
+    public string Output { get; set; } = string.Empty;
+}
+
+#endregion
+
 #region Proxy Models
 
 public enum TlsMode
@@ -145,6 +224,14 @@ public class ProxyHostConfig
     public List<RouteRule> Rules { get; set; } = new();
     public LoggingHostConfig Logging { get; set; } = new();
     public MtlsConfig? Mtls { get; set; }
+
+    /// <summary>
+    /// Per-host upstream probe. Null means "use the defaults": probe the first
+    /// upstream's root path. <see cref="HealthCheckConfig.Enabled"/> is what
+    /// actually turns probing on or off.
+    /// </summary>
+    public HealthCheckConfig? HealthCheck { get; set; }
+
     public DateTime? UpdatedAt { get; set; }
 }
 
@@ -293,6 +380,7 @@ public class AppConfig
     public PanelConfig Panel { get; set; } = new();
     public DockerConfig Docker { get; set; } = new();
     public NginxConfig Nginx { get; set; } = new();
+    public ComposeConfig Compose { get; set; } = new();
     public LoggingConfig Logging { get; set; } = new();
     public SecurityConfig Security { get; set; } = new();
     public AclConfig Acl { get; set; } = new();
@@ -341,6 +429,27 @@ public class NginxConfig
     public string ExecutablePath { get; set; } = "nginx";
 }
 
+public class ComposeConfig
+{
+    /// <summary>Directory holding panel-managed stacks, one subdirectory per project.</summary>
+    public string StacksPath { get; set; } = "data/compose";
+
+    /// <summary>Path to the docker CLI used to run <c>docker compose</c>.</summary>
+    public string DockerExecutablePath { get; set; } = "docker";
+
+    /// <summary>Seconds before a compose command is killed.</summary>
+    public int CommandTimeout { get; set; } = 300;
+
+    /// <summary>
+    /// Host-side absolute path that <see cref="StacksPath"/> is mounted from.
+    /// The daemon resolves relative bind mounts against the project directory it is
+    /// given, and that path must exist on the host, not inside the panel container.
+    /// Set this to the host path so relative binds land where the user expects;
+    /// leave empty to pass the in-container path through unchanged.
+    /// </summary>
+    public string? HostPathPrefix { get; set; }
+}
+
 public class LoggingConfig
 {
     public string Level { get; set; } = "Information";
@@ -373,7 +482,16 @@ public enum HealthStatus
 public class HealthCheckConfig
 {
     public bool Enabled { get; set; }
+
+    /// <summary>
+    /// Absolute probe URL. Left empty on a proxy host, where it is derived from
+    /// the first upstream plus <see cref="Path"/> when the sweep runs.
+    /// </summary>
     public string Url { get; set; } = string.Empty;
+
+    /// <summary>Path appended to the upstream, e.g. <c>/healthz</c>.</summary>
+    public string? Path { get; set; }
+
     public string Method { get; set; } = "GET";
     public int IntervalSeconds { get; set; } = 30;
     public int TimeoutSeconds { get; set; } = 5;
@@ -704,6 +822,215 @@ public class MtlsProfile
     public string CaCertPath { get; set; } = string.Empty;
     public bool RequireClientCert { get; set; } = true;
     public string? Description { get; set; }
+}
+
+#endregion
+
+#region Docker Network & Volume Models
+
+public class DockerNetwork
+{
+    public string Id { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string Driver { get; set; } = string.Empty;
+    public string Scope { get; set; } = string.Empty;
+    public DateTime Created { get; set; }
+    public string? Subnet { get; set; }
+    public string? Gateway { get; set; }
+    public bool Internal { get; set; }
+    public bool EnableIpv6 { get; set; }
+    public Dictionary<string, string> Labels { get; set; } = new();
+    public List<string> ConnectedContainers { get; set; } = new();
+    public string HostId { get; set; } = string.Empty;
+    public string HostName { get; set; } = string.Empty;
+}
+
+public class DockerVolume
+{
+    public string Name { get; set; } = string.Empty;
+    public string Driver { get; set; } = string.Empty;
+    public string Mountpoint { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Null when the daemon reported no creation time, or a timestamp it sent in a
+    /// shape we could not parse. Rendered as "-" rather than as 0001-01-01.
+    /// </summary>
+    public DateTime? CreatedAt { get; set; }
+
+    public Dictionary<string, string> Labels { get; set; } = new();
+    public long Size { get; set; }
+    public List<string> UsedByContainers { get; set; } = new();
+    public string HostId { get; set; } = string.Empty;
+    public string HostName { get; set; } = string.Empty;
+
+    public string SizeFormatted => Size <= 0 ? "-" : FormatBytes(Size);
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
+        int order = 0;
+        double size = bytes;
+        while (size >= 1024 && order < sizes.Length - 1) { order++; size /= 1024; }
+        return $"{size:0.##} {sizes[order]}";
+    }
+}
+
+/// <summary>Aggregate disk usage from `docker system df`, one row per category.</summary>
+public class DockerSystemDf
+{
+    public string Category { get; set; } = string.Empty;
+    public string Total { get; set; } = string.Empty;
+    public string Active { get; set; } = string.Empty;
+    public string Reclaimable { get; set; } = string.Empty;
+    public long TotalBytes { get; set; }
+    public long ReclaimableBytes { get; set; }
+}
+
+/// <summary>What would be removed by a prune, surfaced for confirmation before deleting.</summary>
+public class PrunePreview
+{
+    public string Category { get; set; } = string.Empty;
+    public int Count { get; set; }
+    public List<string> Items { get; set; } = new();
+}
+
+public class PruneResult
+{
+    public string Category { get; set; } = string.Empty;
+    public bool Success { get; set; }
+    public long SpaceReclaimed { get; set; }
+    public string? Error { get; set; }
+}
+
+#endregion
+
+#region Container Create Model
+
+public class CreateContainerRequest
+{
+    public string Name { get; set; } = string.Empty;
+    public string Image { get; set; } = string.Empty;
+    public string HostId { get; set; } = string.Empty;
+    public List<PortMapping> Ports { get; set; } = new();
+    public List<EnvironmentVariable> Env { get; set; } = new();
+    public List<VolumeMount> Mounts { get; set; } = new();
+    public string? Network { get; set; }
+    public string RestartPolicy { get; set; } = "no";
+    public Dictionary<string, string> Labels { get; set; } = new();
+}
+
+public class EnvironmentVariable
+{
+    public string Key { get; set; } = string.Empty;
+    public string Value { get; set; } = string.Empty;
+}
+
+public class VolumeMount
+{
+    public string Source { get; set; } = string.Empty;
+    public string Destination { get; set; } = string.Empty;
+    public bool ReadOnly { get; set; }
+}
+
+#endregion
+
+#region Nginx Snapshot Models
+
+public class NginxSnapshot
+{
+    public string Id { get; set; } = string.Empty;
+    public DateTime CreatedAt { get; set; }
+    public string? Reason { get; set; }
+    public string? HostId { get; set; }
+    public List<NginxSnapshotFile> Files { get; set; } = new();
+}
+
+public class NginxSnapshotFile
+{
+    public string RelativePath { get; set; } = string.Empty;
+    public long Size { get; set; }
+}
+
+/// <summary>An nginx config file the raw editor can read and write.</summary>
+public class NginxConfigFile
+{
+    public string Path { get; set; } = string.Empty;
+    public string RelativePath { get; set; } = string.Empty;
+    public long Size { get; set; }
+}
+
+/// <summary>Parsed stub_status output for the nginx runtime panel.</summary>
+public class NginxStubStatus
+{
+    public int ActiveConnections { get; set; }
+    public long AcceptedConnections { get; set; }
+    public long HandledConnections { get; set; }
+    public long TotalRequests { get; set; }
+    public int Reading { get; set; }
+    public int Writing { get; set; }
+    public int Waiting { get; set; }
+    public DateTime CollectedAt { get; set; } = DateTime.UtcNow;
+}
+
+/// <summary>Named security/config presets the host pages can apply in one click.</summary>
+public enum SecurityPreset
+{
+    Hsts,
+    SecurityHeaders,
+    Csp,
+    Gzip,
+    RateLimit
+}
+
+#endregion
+
+#region Access Log Analysis Models
+
+public class AccessLogAnalysis
+{
+    public DateTime AnalyzedAt { get; set; } = DateTime.UtcNow;
+    public int TotalRequests { get; set; }
+    public Dictionary<string, int> ByStatusCode { get; set; } = new();
+    public List<NameCount> TopPaths { get; set; } = new();
+    public List<NameCount> TopIps { get; set; } = new();
+    public List<NameCount> TopUserAgents { get; set; } = new();
+    public List<NameCount> TopReferrers { get; set; } = new();
+    public List<NameCount> ByMethod { get; set; } = new();
+    public double AverageResponseTimeMs { get; set; }
+    public int ErrorCount { get; set; }
+    public double ErrorRate => TotalRequests == 0 ? 0 : (double)ErrorCount / TotalRequests * 100;
+}
+
+public class NameCount
+{
+    public string Name { get; set; } = string.Empty;
+    public int Count { get; set; }
+}
+
+#endregion
+
+#region Label Auto-Discovery Models
+
+/// <summary>
+/// A proxy host discovered from container labels, kept in a separate directory
+/// from manual hosts so the two never overwrite each other.
+/// </summary>
+public class DiscoveredProxyHost
+{
+    public string HostId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Which <c>ncpm.aliases</c> entry produced this route, or null when the
+    /// container declared a single unnamed one.
+    /// </summary>
+    public string? Alias { get; set; }
+
+    public string ContainerId { get; set; } = string.Empty;
+    public string ContainerName { get; set; } = string.Empty;
+    public string? ComposeProject { get; set; }
+    public ProxyHostConfig Config { get; set; } = new();
+    public bool HasConflict { get; set; }
+    public string? ConflictWith { get; set; }
 }
 
 #endregion

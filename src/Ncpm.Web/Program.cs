@@ -70,6 +70,10 @@ builder.Services.AddSingleton<AuthService>();
 builder.Services.AddSingleton<AcmeService>();
 builder.Services.AddSingleton<AclService>();
 builder.Services.AddSingleton<Ncpm.Services.NotificationService>();
+builder.Services.AddSingleton<Ncpm.Services.ComposeService>();
+builder.Services.AddSingleton<Ncpm.Services.LabelDiscoveryService>();
+builder.Services.AddSingleton<Ncpm.Services.NginxSnapshotService>();
+builder.Services.AddSingleton<Ncpm.Services.AccessLogAnalyzer>();
 
 // Add authentication
 builder.Services.AddAuthorizationCore();
@@ -121,6 +125,9 @@ healthCheckService.Start();
 
 var monitorService = app.Services.GetRequiredService<MonitorService>();
 monitorService.Start();
+
+var labelDiscoveryService = app.Services.GetRequiredService<Ncpm.Services.LabelDiscoveryService>();
+labelDiscoveryService.Start();
 
 try
 {

@@ -11,9 +11,23 @@ public class HealthCheckService : IDisposable
     private readonly ILogger<HealthCheckService> _logger;
     private readonly ConcurrentDictionary<string, ProxyHostHealth> _healthStatus = new();
     private readonly ConcurrentDictionary<string, HealthCheckConfig> _healthConfigs = new();
+
+    // Display name per host id, so the health page can show the domain rather
+    // than the opaque id.
+    private readonly ConcurrentDictionary<string, string> _hostNames = new();
+
+    // When each host was last probed, so per-host intervals are honoured instead
+    // of probing everything on the sweep timer's cadence.
+    private readonly ConcurrentDictionary<string, DateTime> _lastProbe = new();
+
     private readonly HttpClient _httpClient;
     private Timer? _checkTimer;
     private bool _disposed;
+
+    // Set whenever configuration changes; the next sweep rebuilds the probe set.
+    // Starts at 1 so the first sweep loads it. Reloading directly from the config
+    // watcher would re-read every file several times per save.
+    private int _reloadRequested = 1;
 
     public event Action<string, HealthCheckResult>? OnHealthCheckCompleted;
     public event Action<string, HealthStatus>? OnHealthStatusChanged;
@@ -53,34 +67,98 @@ public class HealthCheckService : IDisposable
 
     public void Start()
     {
-        LoadHealthConfigs();
+        _configService.OnConfigChanged += RequestReload;
         _checkTimer = new Timer(PerformHealthChecks, null, TimeSpan.Zero, TimeSpan.FromSeconds(10));
         _logger.LogInformation("Health check service started");
     }
 
     public void Stop()
     {
+        _configService.OnConfigChanged -= RequestReload;
         _checkTimer?.Dispose();
         _checkTimer = null;
         _logger.LogInformation("Health check service stopped");
     }
 
+    private void RequestReload() => Interlocked.Exchange(ref _reloadRequested, 1);
+
+    /// <summary>
+    /// Rebuilds the probe set from the current proxy hosts, manual and discovered.
+    /// This runs on every config change: it used to run once at startup, so a host
+    /// added afterwards was never probed.
+    /// </summary>
     private void LoadHealthConfigs()
     {
-        var hosts = _configService.LoadProxyHosts();
+        var hosts = _configService.LoadProxyHosts()
+            .Concat(_configService.LoadDiscoveredProxyHosts())
+            .ToList();
+
+        var live = new HashSet<string>(StringComparer.Ordinal);
+
         foreach (var host in hosts)
         {
-            if (host.Http.ConnectTimeout != null)
-            {
-                _healthConfigs[host.Id] = new HealthCheckConfig
-                {
-                    Enabled = host.Enabled,
-                    Url = host.Upstreams.FirstOrDefault()?.Url ?? string.Empty,
-                    IntervalSeconds = 30,
-                    TimeoutSeconds = 5
-                };
-            }
+            var probe = BuildProbe(host);
+            if (probe == null)
+                continue;
+
+            _healthConfigs[host.Id] = probe;
+            _hostNames[host.Id] = host.Hosts.FirstOrDefault() ?? host.Id;
+            live.Add(host.Id);
         }
+
+        // Forget hosts that no longer exist, or the health page lists them forever.
+        foreach (var stale in _healthConfigs.Keys.Where(id => !live.Contains(id)).ToList())
+        {
+            _healthConfigs.TryRemove(stale, out _);
+            _healthStatus.TryRemove(stale, out _);
+            _hostNames.TryRemove(stale, out _);
+            _lastProbe.TryRemove(stale, out _);
+        }
+    }
+
+    /// <summary>
+    /// A host is probed when it is enabled and has an HTTP upstream. Absent
+    /// configuration means "probe the root path" — a proxy host pointing at a dead
+    /// upstream is exactly what this is for. TCP/UDP and file-server hosts have
+    /// nothing to probe over HTTP and are skipped.
+    /// </summary>
+    private static HealthCheckConfig? BuildProbe(ProxyHostConfig host)
+    {
+        if (!host.Enabled)
+            return null;
+
+        if (host.Scheme is not (ProxyScheme.Http or ProxyScheme.Https))
+            return null;
+
+        var upstream = host.Upstreams.FirstOrDefault()?.Url;
+        if (string.IsNullOrWhiteSpace(upstream))
+            return null;
+
+        var configured = host.HealthCheck;
+        if (configured is { Enabled: false })
+            return null;
+
+        return new HealthCheckConfig
+        {
+            Enabled = true,
+            Url = CombineUrl(upstream, configured?.Path),
+            Method = configured?.Method ?? "GET",
+            IntervalSeconds = Math.Max(5, configured?.IntervalSeconds ?? 30),
+            TimeoutSeconds = Math.Max(1, configured?.TimeoutSeconds ?? 5),
+            ExpectedStatusCode = configured?.ExpectedStatusCode,
+            ExpectedBody = configured?.ExpectedBody,
+            Headers = configured?.Headers ?? new()
+        };
+    }
+
+    private static string CombineUrl(string upstream, string? path)
+    {
+        var baseUrl = upstream.TrimEnd('/');
+
+        if (string.IsNullOrWhiteSpace(path) || path == "/")
+            return baseUrl + "/";
+
+        return path.StartsWith('/') ? baseUrl + path : $"{baseUrl}/{path}";
     }
 
     public ProxyHostHealth? GetHealthStatus(string hostId)
@@ -99,8 +177,26 @@ public class HealthCheckService : IDisposable
         // process, so everything is contained here.
         try
         {
-            var tasks = _healthConfigs.Select(kvp => CheckHostHealth(kvp.Key, kvp.Value));
-            await Task.WhenAll(tasks);
+            if (Interlocked.Exchange(ref _reloadRequested, 0) == 1)
+            {
+                LoadHealthConfigs();
+            }
+
+            // The timer ticks faster than most intervals, so only probe hosts that
+            // are actually due; otherwise every host would be hit every 10s no
+            // matter what its interval says.
+            var now = DateTime.UtcNow;
+            var due = _healthConfigs
+                .Where(kvp => !_lastProbe.TryGetValue(kvp.Key, out var last)
+                              || (now - last).TotalSeconds >= kvp.Value.IntervalSeconds)
+                .ToList();
+
+            foreach (var kvp in due)
+            {
+                _lastProbe[kvp.Key] = now;
+            }
+
+            await Task.WhenAll(due.Select(kvp => CheckHostHealth(kvp.Key, kvp.Value)));
         }
         catch (Exception ex)
         {
@@ -178,10 +274,13 @@ public class HealthCheckService : IDisposable
 
     private void UpdateHealthStatus(string hostId, HealthCheckResult result)
     {
+        var hostName = _hostNames.GetValueOrDefault(hostId, hostId);
+
         _healthStatus.AddOrUpdate(hostId,
             new ProxyHostHealth
             {
                 HostId = hostId,
+                HostName = hostName,
                 Status = result.Status,
                 LastChecked = result.CheckedAt,
                 LatencyMs = result.LatencyMs,
@@ -191,6 +290,7 @@ public class HealthCheckService : IDisposable
             (key, existing) =>
             {
                 var previousStatus = existing.Status;
+                existing.HostName = hostName;
                 existing.Status = result.Status;
                 existing.LastChecked = result.CheckedAt;
                 existing.LatencyMs = result.LatencyMs;
@@ -216,6 +316,7 @@ public class HealthCheckService : IDisposable
     {
         if (!_disposed)
         {
+            _configService.OnConfigChanged -= RequestReload;
             OnHealthStatusChanged -= NotifyStatusChange;
             _checkTimer?.Dispose();
             _checkTimer = null;

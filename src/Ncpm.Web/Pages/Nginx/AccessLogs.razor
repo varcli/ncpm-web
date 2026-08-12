@@ -1,0 +1,221 @@
+@page "/nginx/logs"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@inject NginxService NginxService
+@inject AccessLogAnalyzer Analyzer
+@inject IMessageService Message
+
+<PageHeader Title="访问日志分析" Subtitle="解析 nginx access.log 并汇总" />
+
+<Alert Type="@AlertType.Info" ShowIcon="true" Style="margin-bottom: 16px;"
+       Message="仅分析最近 10000 行日志"
+       Description="日志文件可能很大，这里只读取尾部进行分析，保证页面响应速度。点击「刷新分析」重新读取。" />
+
+<div Style="margin-bottom: 16px;">
+    <Select @bind-Value="@_maxLines" Style="width: 160px;" TItem="int" TItemValue="int">
+        <SelectOption TItem="int" TItemValue="int" Value="1000" Label="最近 1,000 行" />
+        <SelectOption TItem="int" TItemValue="int" Value="5000" Label="最近 5,000 行" />
+        <SelectOption TItem="int" TItemValue="int" Value="10000" Label="最近 10,000 行" />
+        <SelectOption TItem="int" TItemValue="int" Value="50000" Label="最近 50,000 行" />
+    </Select>
+    <Button Type="@ButtonType.Primary" Icon="@IconType.Outline.Reload" OnClick="Analyze" Loading="@_analyzing" Style="margin-left: 8px;">刷新分析</Button>
+    <Button OnClick="ViewRaw" Style="margin-left: 8px;">查看原始日志</Button>
+</div>
+
+@if (_analysis != null)
+{
+    <Row Gutter="16">
+        <AntDesign.Col Span="6">
+            <Card Size="@CardSize.Small">
+                <Statistic Title="总请求数" Value="@_analysis.TotalRequests" />
+            </Card>
+        </AntDesign.Col>
+        <AntDesign.Col Span="6">
+            <Card Size="@CardSize.Small">
+                <Statistic Title="错误数 (4xx/5xx)" Value="@_analysis.ErrorCount"
+                           ValueStyle="@(_analysis.ErrorCount > 0 ? "color: #cf1322;" : "")" />
+            </Card>
+        </AntDesign.Col>
+        <AntDesign.Col Span="6">
+            <Card Size="@CardSize.Small">
+                <Statistic Title="错误率" Value="@_analysis.ErrorRate" Suffix="%" Precision="2"
+                           ValueStyle="@(_analysis.ErrorRate > 5 ? "color: #cf1322;" : "")" />
+            </Card>
+        </AntDesign.Col>
+        <AntDesign.Col Span="6">
+            <Card Size="@CardSize.Small">
+                <Statistic Title="平均响应时间" Value="@_analysis.AverageResponseTimeMs" Suffix="ms" Precision="2" />
+            </Card>
+        </AntDesign.Col>
+    </Row>
+
+    <Row Gutter="16" Style="margin-top: 16px;">
+        <AntDesign.Col Span="8">
+            <Card Title="状态码分布" Size="@CardSize.Small">
+                @if (_analysis.ByStatusCode.Any())
+                {
+                    <Descriptions Bordered Column="1">
+                        @foreach (var kv in _analysis.ByStatusCode.OrderBy(x => x.Key))
+                        {
+                            <DescriptionsItem>
+                                <Tag Color="@StatusColor(kv.Key)">@kv.Key</Tag>
+                                <span Style="margin-left: 8px;">@kv.Value 次</span>
+                                <span Style="margin-left: 8px; color: rgba(0,0,0,0.45);">@((kv.Value * 100.0 / Math.Max(1, _analysis.TotalRequests)).ToString("F1"))%</span>
+                            </DescriptionsItem>
+                        }
+                    </Descriptions>
+                }
+                else
+                {
+                    <Empty Description="@("无数据")" />
+                }
+            </Card>
+        </AntDesign.Col>
+        <AntDesign.Col Span="8">
+            <Card Title="请求方法" Size="@CardSize.Small">
+                @if (_analysis.ByMethod.Any())
+                {
+                    <Descriptions Bordered Column="1">
+                        @foreach (var m in _analysis.ByMethod)
+                        {
+                            <DescriptionsItem>
+                                <Tag>@m.Name</Tag>
+                                <span Style="margin-left: 8px;">@m.Count</span>
+                            </DescriptionsItem>
+                        }
+                    </Descriptions>
+                }
+                else
+                {
+                    <Empty Description="@("无数据")" />
+                }
+            </Card>
+        </AntDesign.Col>
+        <AntDesign.Col Span="8">
+            <Card Title="TOP 来源 IP" Size="@CardSize.Small">
+                @if (_analysis.TopIps.Any())
+                {
+                    <div Style="max-height: 280px; overflow: auto;">
+                        @foreach (var ip in _analysis.TopIps)
+                        {
+                            <div Style="display: flex; align-items: center; padding: 6px 0; border-bottom: 1px solid rgba(0,0,0,0.06);">
+                                <span Style="font-family: monospace; font-size: 13px;">@ip.Name</span>
+                                <Tag Color="@("blue")" Style="margin-left: auto;">@ip.Count</Tag>
+                            </div>
+                        }
+                    </div>
+                }
+                else
+                {
+                    <Empty Description="@("无数据")" />
+                }
+            </Card>
+        </AntDesign.Col>
+    </Row>
+
+    <Row Gutter="16" Style="margin-top: 16px;">
+        <AntDesign.Col Span="12">
+            <Card Title="TOP 请求路径" Size="@CardSize.Small">
+                @if (_analysis.TopPaths.Any())
+                {
+                    <Table TItem="NameCount" DataSource="@_analysis.TopPaths" Size="@TableSize.Small"
+                           Pagination="false" RowKey="x => x.Name">
+                        <PropertyColumn Property="x => x.Name" Title="路径">
+                            <Text Style="font-family: monospace; font-size: 12px;" Ellipsis>@context.Name</Text>
+                        </PropertyColumn>
+                        <PropertyColumn Property="x => x.Count" Title="次数" Width="100" />
+                    </Table>
+                }
+                else
+                {
+                    <Empty Description="@("无数据")" />
+                }
+            </Card>
+        </AntDesign.Col>
+        <AntDesign.Col Span="12">
+            <Card Title="TOP User-Agent" Size="@CardSize.Small">
+                @if (_analysis.TopUserAgents.Any())
+                {
+                    <Table TItem="NameCount" DataSource="@_analysis.TopUserAgents" Size="@TableSize.Small"
+                           Pagination="false" RowKey="x => x.Name">
+                        <PropertyColumn Property="x => x.Name" Title="User-Agent">
+                            <Text Style="font-size: 12px;" Ellipsis>@context.Name</Text>
+                        </PropertyColumn>
+                        <PropertyColumn Property="x => x.Count" Title="次数" Width="100" />
+                    </Table>
+                }
+                else
+                {
+                    <Empty Description="@("无数据")" />
+                }
+            </Card>
+        </AntDesign.Col>
+    </Row>
+}
+
+<Modal Title="原始访问日志" Visible="@_rawVisible" Width="900"
+       OnCancel="() => _rawVisible = false" OnOk="() => _rawVisible = false">
+    <div Style="max-height: 60vh; overflow: auto; background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 4px;">
+        @foreach (var line in _rawLines)
+        {
+            <div Style="font-family: monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all;">
+                @line
+            </div>
+        }
+        @if (!_rawLines.Any())
+        {
+            <div Style="color: rgba(255,255,255,0.45);">暂无日志</div>
+        }
+    </div>
+    <div Style="margin-top: 8px; color: rgba(0,0,0,0.45);">最近 @(_maxLines) 行</div>
+</Modal>
+
+@code {
+    private AccessLogAnalysis? _analysis;
+    private bool _analyzing;
+    private int _maxLines = 10000;
+
+    private bool _rawVisible;
+    private List<string> _rawLines = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Analyze();
+    }
+
+    private async Task Analyze()
+    {
+        _analyzing = true;
+        try
+        {
+            var path = NginxService.GetAccessLogPath();
+            _analysis = await Task.Run(() => Analyzer.Analyze(path, _maxLines));
+            if (_analysis.TotalRequests == 0)
+            {
+                Message.Info("未解析到日志记录。日志文件可能为空，或尚未产生流量。");
+            }
+        }
+        finally
+        {
+            _analyzing = false;
+        }
+    }
+
+    private async Task ViewRaw()
+    {
+        _rawLines = await NginxService.ReadAccessLogTailAsync(_maxLines);
+        _rawVisible = true;
+    }
+
+    private static string StatusColor(string status) => status switch
+    {
+        "200" => "green",
+        "201" or "202" or "204" => "green",
+        var s when s.StartsWith('3') => "blue",
+        var s when s.StartsWith('4') => "orange",
+        var s when s.StartsWith('5') => "red",
+        _ => "default"
+    };
+}

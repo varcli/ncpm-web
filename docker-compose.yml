@@ -15,9 +15,9 @@ services:
       # e.g. - "5432:5432"
     volumes:
       - ./deploy/data:/app/data
-      # Read-only socket mount. A restricted Docker socket proxy is the safer
-      # option for anything exposed beyond a trusted network.
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # The socket must be read-write for Compose to create/start/stop containers.
+      # For untrusted networks, front this with a restricted Docker socket proxy.
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - ASPNETCORE_URLS=http://+:8098

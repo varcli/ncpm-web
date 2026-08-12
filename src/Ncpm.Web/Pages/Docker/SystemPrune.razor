@@ -1,0 +1,103 @@
+@page "/docker/prune"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@inject DockerService DockerService
+@inject IMessageService Message
+
+<PageHeader Title="系统清理" Subtitle="清理未使用的 Docker 资源">
+    <PageHeaderExtra>
+        <Select @bind-Value="@_selectedHostId" TItem="string" TItemValue="string"
+                Placeholder="全部主机" Style="width: 200px; margin-right: 8px;" AllowClear>
+            <SelectOptions>
+                @foreach (var host in _hosts)
+                {
+                    <SelectOption TItem="string" TItemValue="string" Value="@host.Id" Label="@host.Name" />
+                }
+            </SelectOptions>
+        </Select>
+        <Button Icon="@IconType.Outline.Reload" OnClick="RefreshPreviews">刷新预览</Button>
+    </PageHeaderExtra>
+</PageHeader>
+
+<Alert Type="@AlertType.Warning" ShowIcon="true" Style="margin-bottom: 16px;"
+       Message="清理操作不可撤销"
+       Description="预览将列出每类资源里可被清理的对象。确认后再执行，已删除的容器、镜像、卷和网络无法恢复。" />
+
+<Row Gutter="16">
+    @foreach (var category in _categories)
+    {
+        <AntDesign.Col Span="12" Style="margin-bottom: 16px;">
+            <Card Title="@category.Label" Size="@CardSize.Small">
+                @if (_previews.TryGetValue(category.Key, out var preview))
+                {
+                    <p>可清理对象: <strong>@preview.Count</strong></p>
+                    @if (preview.Items.Count > 0)
+                    {
+                        <div Style="max-height: 160px; overflow: auto; margin-bottom: 12px; background: #fafafa; padding: 8px; border-radius: 4px;">
+                            @foreach (var item in preview.Items)
+                            {
+                                <div Style="font-family: monospace; font-size: 12px;">@item</div>
+                            }
+                        </div>
+                        <Popconfirm Title="@($"确认清理 {preview.Count} 个{category.Label}？")" OnConfirm="() => Prune(category.Key)">
+                            <Button Type="@ButtonType.Primary" Danger>执行清理</Button>
+                        </Popconfirm>
+                    }
+                    else
+                    {
+                        <Alert Type="@AlertType.Success" ShowIcon="true" Message="无可清理对象" />
+                    }
+                }
+                else
+                {
+                    <Spin />
+                }
+            </Card>
+        </AntDesign.Col>
+    }
+</Row>
+
+@code {
+    private List<DockerHost> _hosts = new();
+    private string? _selectedHostId;
+    private readonly Dictionary<string, PrunePreview> _previews = new();
+
+    private readonly List<(string Key, string Label)> _categories = new()
+    {
+        ("container", "已停止容器"),
+        ("image", "悬空镜像"),
+        ("volume", "未使用卷"),
+        ("network", "未使用网络")
+    };
+
+    protected override async Task OnInitializedAsync()
+    {
+        _hosts = DockerService.GetAllHosts();
+        await RefreshPreviews();
+    }
+
+    private async Task RefreshPreviews()
+    {
+        _previews.Clear();
+        foreach (var (key, _) in _categories)
+        {
+            _previews[key] = await DockerService.PrunePreviewAsync(key, _selectedHostId);
+        }
+    }
+
+    private async Task Prune(string category)
+    {
+        var result = await DockerService.PruneAsync(category, _selectedHostId);
+        if (result.Success)
+        {
+            Message.Success($"{category} 清理完成");
+        }
+        else
+        {
+            Message.Error($"清理失败: {result.Error}");
+        }
+        await RefreshPreviews();
+    }
+}

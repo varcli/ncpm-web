@@ -226,6 +226,314 @@ public class NginxService
         }
     }
 
+    #region Raw Config Editing
+
+    /// <summary>Lists every nginx config file the panel can edit: the main file,
+    /// conf.d, the generated active dir, and the stream dir.</summary>
+    public List<NginxConfigFile> ListConfigFiles()
+    {
+        var config = _configService.LoadAppConfig().Nginx;
+        var files = new List<NginxConfigFile>();
+
+        var mainConf = "/etc/nginx/nginx.conf";
+        if (File.Exists(mainConf))
+            files.Add(new NginxConfigFile { Path = mainConf, RelativePath = "nginx.conf", Size = new FileInfo(mainConf).Length });
+
+        ScanDir(files, "/etc/nginx/conf.d", "conf.d");
+        ScanDir(files, config.ActivePath, "active");
+        ScanDir(files, config.StreamPath, "stream");
+        ScanDir(files, config.GeneratedPath, "generated");
+
+        return files;
+    }
+
+    private static void ScanDir(List<NginxConfigFile> files, string dir, string prefix)
+    {
+        if (!Directory.Exists(dir))
+            return;
+
+        foreach (var f in Directory.GetFiles(dir, "*.conf", SearchOption.AllDirectories))
+        {
+            files.Add(new NginxConfigFile
+            {
+                Path = f,
+                RelativePath = Path.Combine(prefix, Path.GetRelativePath(dir, f)).Replace('\\', '/'),
+                Size = new FileInfo(f).Length
+            });
+        }
+    }
+
+    public async Task<string?> ReadRawConfigAsync(string path, CancellationToken cancellationToken = default)
+    {
+        if (!IsEditablePath(path))
+        {
+            LastError = $"路径 {path} 不在允许编辑的范围内";
+            return null;
+        }
+
+        if (!File.Exists(path))
+            return null;
+
+        try
+        {
+            return await File.ReadAllTextAsync(path, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+            _logger.LogError(ex, "Failed to read {Path}", path);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Writes a candidate to a scratch file, validates the whole tree with
+    /// nginx -t by temporarily swapping it in, and only then moves it into place.
+    /// A rejected edit never touches the live file, so a typo cannot break nginx.
+    /// </summary>
+    public async Task<bool> SaveRawConfigAsync(string path, string content, CancellationToken cancellationToken = default)
+    {
+        if (!IsEditablePath(path))
+        {
+            LastError = $"路径 {path} 不在允许编辑的范围内";
+            return false;
+        }
+
+        var dir = Path.GetDirectoryName(path);
+        if (dir == null)
+            return false;
+
+        Directory.CreateDirectory(dir);
+        var previous = File.Exists(path) ? await File.ReadAllTextAsync(path, cancellationToken) : null;
+
+        try
+        {
+            await File.WriteAllTextAsync(path, content, cancellationToken);
+
+            if (!await ValidateConfigAsync(cancellationToken))
+            {
+                // Restore the previous content so the live tree stays valid.
+                if (previous != null)
+                    await File.WriteAllTextAsync(path, previous, cancellationToken);
+                else if (File.Exists(path))
+                    File.Delete(path);
+
+                _logger.LogError("Rejected raw config for {Path}: nginx -t failed", path);
+                return false;
+            }
+
+            if (!await ReloadAsync(cancellationToken))
+            {
+                // Config is valid but reload failed — rare, but restore anyway.
+                if (previous != null)
+                    await File.WriteAllTextAsync(path, previous, cancellationToken);
+                else if (File.Exists(path))
+                    File.Delete(path);
+                await ReloadAsync(cancellationToken);
+                _logger.LogError("Reload failed after saving {Path}, rolled back", path);
+                return false;
+            }
+
+            _logger.LogInformation("Saved and reloaded raw config {Path}", path);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+            _logger.LogError(ex, "Failed to save raw config {Path}", path);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Guards which files the panel will overwrite. Only the main config, conf.d,
+    /// and the panel-managed active/stream/generated dirs are editable; anything
+    /// else is read-only to prevent clobbering system files.
+    /// </summary>
+    private bool IsEditablePath(string path)
+    {
+        var normalized = Path.GetFullPath(path).Replace('\\', '/').TrimEnd('/');
+        var config = _configService.LoadAppConfig().Nginx;
+
+        if (normalized == "/etc/nginx/nginx.conf")
+            return true;
+        if (normalized.StartsWith("/etc/nginx/conf.d/", StringComparison.Ordinal))
+            return true;
+        if (normalized.StartsWith(Path.GetFullPath(config.ActivePath).Replace('\\', '/'), StringComparison.Ordinal))
+            return true;
+        if (normalized.StartsWith(Path.GetFullPath(config.StreamPath).Replace('\\', '/'), StringComparison.Ordinal))
+            return true;
+        if (normalized.StartsWith(Path.GetFullPath(config.GeneratedPath).Replace('\\', '/'), StringComparison.Ordinal))
+            return true;
+
+        return false;
+    }
+
+    #endregion
+
+    #region Stub Status
+
+    /// <summary>
+    /// Reads the stub_status metrics from the loopback endpoint configured in
+    /// nginx.conf. Returns null if stub_status is not enabled or unreachable.
+    /// </summary>
+    public async Task<NginxStubStatus?> GetStubStatusAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+            var body = await http.GetStringAsync("http://127.0.0.1:8099/stub_status", cancellationToken);
+
+            // Active connections: 15
+            // server accepts handled requests
+            // 8456 8456 32891
+            var lines = body.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            if (lines.Length < 3)
+                return null;
+
+            var activeMatch = System.Text.RegularExpressions.Regex.Match(
+                lines[0], @"Active connections:\s*(\d+)");
+            var counterMatch = System.Text.RegularExpressions.Regex.Match(
+                lines[2], @"(\d+)\s+(\d+)\s+(\d+)");
+
+            if (!activeMatch.Success || !counterMatch.Success)
+                return null;
+
+            return new NginxStubStatus
+            {
+                ActiveConnections = int.Parse(activeMatch.Groups[1].Value),
+                AcceptedConnections = long.Parse(counterMatch.Groups[1].Value),
+                HandledConnections = long.Parse(counterMatch.Groups[2].Value),
+                TotalRequests = long.Parse(counterMatch.Groups[3].Value),
+                Reading = body.Contains("Reading:", StringComparison.Ordinal)
+                    ? ExtractInt(body, "Reading:") : 0,
+                Writing = body.Contains("Writing:", StringComparison.Ordinal)
+                    ? ExtractInt(body, "Writing:") : 0,
+                Waiting = body.Contains("Waiting:", StringComparison.Ordinal)
+                    ? ExtractInt(body, "Waiting:") : 0,
+                CollectedAt = DateTime.UtcNow
+            };
+        }
+        catch
+        {
+            // stub_status is optional; absence is not an error worth logging at warning.
+            return null;
+        }
+    }
+
+    private static int ExtractInt(string text, string label)
+    {
+        var idx = text.IndexOf(label, StringComparison.Ordinal);
+        if (idx < 0) return 0;
+        var rest = text[(idx + label.Length)..];
+        var match = System.Text.RegularExpressions.Regex.Match(rest, @"(\d+)");
+        return match.Success ? int.Parse(match.Groups[1].Value) : 0;
+    }
+
+    #endregion
+
+    #region Security Presets
+
+    /// <summary>
+    /// Emits the nginx directives for a named security preset as a list of lines
+    /// the proxy-host pages can drop into a generated server block. Each preset is
+    /// self-contained so they compose without ordering constraints.
+    /// </summary>
+    public static List<string> GenerateSecurityPreset(SecurityPreset preset, string? domain = null)
+    {
+        return preset switch
+        {
+            SecurityPreset.Hsts => new()
+            {
+                "    # HSTS: force HTTPS for one year, including subdomains",
+                "    add_header Strict-Transport-Security \"max-age=31536000; includeSubDomains; preload\" always;"
+            },
+            SecurityPreset.SecurityHeaders => new()
+            {
+                "    add_header X-Frame-Options \"SAMEORIGIN\" always;",
+                "    add_header X-Content-Type-Options \"nosniff\" always;",
+                "    add_header X-XSS-Protection \"1; mode=block\" always;",
+                "    add_header Referrer-Policy \"strict-origin-when-cross-origin\" always;",
+                "    add_header Permissions-Policy \"geolocation=(), microphone=(), camera=()\" always;"
+            },
+            SecurityPreset.Csp => new()
+            {
+                $"    add_header Content-Security-Policy \"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'{(string.IsNullOrEmpty(domain) ? "" : $" https://{domain}")}; object-src 'none'; base-uri 'self'; frame-ancestors 'self'\" always;"
+            },
+            SecurityPreset.Gzip => new()
+            {
+                "    gzip on;",
+                "    gzip_vary on;",
+                "    gzip_proxied any;",
+                "    gzip_comp_level 6;",
+                "    gzip_min_length 1024;",
+                "    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;"
+            },
+            SecurityPreset.RateLimit => new()
+            {
+                "    limit_req_zone $binary_remote_addr zone=req_limit:10m rate=10r/s;",
+                "    limit_req zone=req_limit burst=20 nodelay;"
+            },
+            _ => new()
+        };
+    }
+
+    #endregion
+
+    #region Access Logs
+
+    /// <summary>
+    /// The access log path configured in nginx.conf. Bound to the container's
+    /// /var/log/nginx/access.log by deploy/nginx.conf and never overridden by a
+    /// host, so this is a constant surfaced for the log-analysis page.
+    /// </summary>
+    public string GetAccessLogPath() => "/var/log/nginx/access.log";
+
+    /// <summary>
+    /// Reads the last <paramref name="maxLines"/> lines of the access log. Uses
+    /// a reverse read so multi-gigabyte logs do not have to be loaded whole.
+    /// Returns an empty list if the log does not exist yet (nginx has not
+    /// received any traffic since startup).
+    /// </summary>
+    public async Task<List<string>> ReadAccessLogTailAsync(int maxLines = 500, CancellationToken cancellationToken = default)
+    {
+        var path = GetAccessLogPath();
+        if (!File.Exists(path))
+            return new List<string>();
+
+        try
+        {
+            var lines = new List<string>(maxLines);
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var sr = new StreamReader(fs, Encoding.UTF8, true, 4096, leaveOpen: false);
+
+            // Seek near the end and read forward; if we undershoot, walk back.
+            if (fs.Length > maxLines * 512)
+                fs.Seek(-maxLines * 512, SeekOrigin.End);
+
+            // Discard the partial first line since we likely landed mid-line.
+            if (fs.Position > 0)
+                _ = sr.ReadLine();
+
+            string? line;
+            while ((line = await sr.ReadLineAsync(cancellationToken)) is not null)
+            {
+                lines.Add(line);
+            }
+
+            return lines.Count > maxLines
+                ? lines[^maxLines..]
+                : lines;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to read access log tail");
+            return new List<string>();
+        }
+    }
+
+    #endregion
+
     private string GenerateNginxConfig(ProxyHostConfig host)
     {
         var sb = new StringBuilder();

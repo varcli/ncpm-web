@@ -14,13 +14,26 @@ RUN dotnet publish src/Ncpm.Web/Ncpm.Web.csproj -c Release -o /app/publish
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
-# Install nginx with stream module and curl
-RUN apt-get update && apt-get install -y nginx libnginx-mod-stream curl && rm -rf /var/lib/apt/lists/*
+# Install nginx with stream module, curl, and the docker CLI + compose plugin.
+# The docker CLI lets the panel drive `docker compose` against the host daemon
+# through the mounted socket; compose is invoked as a subprocess, not re-implemented.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        nginx libnginx-mod-stream curl ca-certificates gnupg && \
+    install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && \
+    chmod a+r /etc/apt/keyrings/docker.asc && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+        > /etc/apt/sources.list.d/docker.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        docker-ce-cli docker-compose-plugin && \
+    rm -rf /var/lib/apt/lists/*
 
 # Create directories
 RUN mkdir -p /app/data/config \
     /app/data/config/proxy-hosts \
+    /app/data/config/discovered-hosts \
     /app/data/config/certificates \
+    /app/data/compose \
     /app/data/nginx/generated \
     /app/data/nginx/active \
     /app/data/nginx/stream \

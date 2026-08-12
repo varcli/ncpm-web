@@ -1,0 +1,127 @@
+@page "/docker/volumes"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@inject DockerService DockerService
+@inject IMessageService Message
+
+<PageHeader Title="Docker 卷" Subtitle="管理数据卷">
+    <PageHeaderExtra>
+        <Select @bind-Value="@_selectedHostId" TItem="string" TItemValue="string"
+                Placeholder="全部主机" Style="width: 200px; margin-right: 8px;" AllowClear>
+            <SelectOptions>
+                @foreach (var host in _hosts)
+                {
+                    <SelectOption TItem="string" TItemValue="string" Value="@host.Id" Label="@host.Name" />
+                }
+            </SelectOptions>
+        </Select>
+        <Button Type="@ButtonType.Primary" Icon="@IconType.Outline.Plus" OnClick="() => _createVisible = true">新建卷</Button>
+        <Button Icon="@IconType.Outline.Reload" OnClick="Refresh">刷新</Button>
+    </PageHeaderExtra>
+</PageHeader>
+
+<Spin Spinning="@_loading">
+    <Table TItem="DockerVolume" DataSource="@_volumes" RowKey="x => x.Name">
+        <PropertyColumn Property="v => v.Name" Title="名称" />
+        <PropertyColumn Property="v => v.Driver" Title="驱动" Width="100" />
+        <PropertyColumn Property="v => v.Mountpoint" Title="挂载点" />
+        <PropertyColumn Property="v => v.CreatedAt" Title="创建时间" Width="160">
+            @(context.CreatedAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "-")
+        </PropertyColumn>
+        <PropertyColumn Property="v => v.HostName" Title="主机" Width="120">
+            <Tag>@context.HostName</Tag>
+        </PropertyColumn>
+        <ActionColumn Title="操作" Width="100">
+            <Popconfirm Title="确认删除此卷？卷内数据将丢失。" OnConfirm="() => Delete(context.Name, context.HostId)">
+                <Button Size="@ButtonSize.Small" Danger Icon="@IconType.Outline.Delete">删除</Button>
+            </Popconfirm>
+        </ActionColumn>
+    </Table>
+</Spin>
+
+<Modal Title="新建卷" @bind-Visible="@_createVisible" Width="500" OnOk="CreateVolume" OnCancel="() => _createVisible = false">
+    <Form Model="@this" Layout="@FormLayout.Vertical">
+        <FormItem Label="名称">
+            <Input @bind-Value="@_newName" Placeholder="my-volume" />
+        </FormItem>
+        <FormItem Label="目标主机">
+            <Select @bind-Value="@_newHostId" TItem="string" TItemValue="string" Placeholder="默认主机">
+                <SelectOptions>
+                    @foreach (var host in _hosts.Where(h => h.IsEnabled))
+                    {
+                        <SelectOption TItem="string" TItemValue="string" Value="@host.Id" Label="@host.Name" />
+                    }
+                </SelectOptions>
+            </Select>
+        </FormItem>
+    </Form>
+</Modal>
+
+@code {
+    private List<DockerVolume> _volumes = new();
+    private List<DockerHost> _hosts = new();
+    private bool _loading = true;
+    private string? _selectedHostId;
+
+    private bool _createVisible;
+    private string _newName = string.Empty;
+    private string? _newHostId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _hosts = DockerService.GetAllHosts();
+        await Refresh();
+    }
+
+    private async Task Refresh()
+    {
+        _loading = true;
+        try
+        {
+            _volumes = await DockerService.ListVolumesAsync(_selectedHostId);
+        }
+        catch (Exception ex)
+        {
+            Message.Error($"加载失败: {ex.Message}");
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task Delete(string name, string hostId)
+    {
+        if (await DockerService.DeleteVolumeAsync(name, hostId, force: true))
+        {
+            Message.Success("卷已删除");
+            await Refresh();
+        }
+        else
+        {
+            Message.Error("删除失败");
+        }
+    }
+
+    private async Task CreateVolume()
+    {
+        if (string.IsNullOrWhiteSpace(_newName) || string.IsNullOrEmpty(_newHostId))
+        {
+            Message.Error("请填写名称并选择主机");
+            return;
+        }
+
+        if (await DockerService.CreateVolumeAsync(_newName, "local", _newHostId))
+        {
+            Message.Success("卷已创建");
+            _createVisible = false;
+            await Refresh();
+        }
+        else
+        {
+            Message.Error("创建失败");
+        }
+    }
+}

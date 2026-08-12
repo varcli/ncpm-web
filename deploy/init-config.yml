@@ -13,6 +13,13 @@ nginx:
   streamPath: "/app/data/nginx/stream"
   certPath: "/app/data/certs"
   executablePath: "nginx"
+compose:
+  stacksPath: "/app/data/compose"
+  dockerExecutablePath: "docker"
+  commandTimeout: 300
+  # Set to the host-side path that data/compose is mounted from so the daemon
+  # resolves relative bind mounts against a path that exists on the host.
+  # hostPathPrefix: "/host/path/to/deploy/data/compose"
 security:
   requireAuth: true
   sessionTimeout: 3600

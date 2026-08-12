@@ -1,0 +1,206 @@
+@page "/docker/containers/create"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@inject DockerService DockerService
+@inject IMessageService Message
+@inject NavigationManager Navigation
+
+<PageHeader Title="创建容器" Subtitle="从镜像创建并启动容器">
+    <PageHeaderExtra>
+        <Button Icon="@IconType.Outline.ArrowLeft" OnClick="GoBack">返回</Button>
+    </PageHeaderExtra>
+</PageHeader>
+
+<Form Model="@_request" Layout="@FormLayout.Vertical">
+    <Tabs DefaultActiveKey="basic">
+        <TabPane Key="basic" Tab="基础">
+            <Row Gutter="16">
+                <AntDesign.Col Span="12">
+                    <FormItem Label="容器名称">
+                        <Input @bind-Value="@_request.Name" Placeholder="my-app" />
+                    </FormItem>
+                </AntDesign.Col>
+                <AntDesign.Col Span="12">
+                    <FormItem Label="镜像">
+                        <Input @bind-Value="@_request.Image" Placeholder="nginx:latest" />
+                    </FormItem>
+                </AntDesign.Col>
+            </Row>
+            <Row Gutter="16">
+                <AntDesign.Col Span="12">
+                    <FormItem Label="目标主机">
+                        <Select @bind-Value="@_request.HostId" TItem="string" TItemValue="string" Placeholder="选择主机">
+                            <SelectOptions>
+                                @foreach (var host in _hosts.Where(h => h.IsEnabled))
+                                {
+                                    <SelectOption TItem="string" TItemValue="string" Value="@host.Id" Label="@host.Name" />
+                                }
+                            </SelectOptions>
+                        </Select>
+                    </FormItem>
+                </AntDesign.Col>
+                <AntDesign.Col Span="12">
+                    <FormItem Label="重启策略">
+                        <Select @bind-Value="@_request.RestartPolicy" TItem="string" TItemValue="string">
+                            <SelectOptions>
+                                <SelectOption TItem="string" TItemValue="string" Value="@("no")" Label="不重启" />
+                                <SelectOption TItem="string" TItemValue="string" Value="@("always")" Label="总是重启" />
+                                <SelectOption TItem="string" TItemValue="string" Value="@("unless-stopped")" Label="除非手动停止" />
+                                <SelectOption TItem="string" TItemValue="string" Value="@("on-failure")" Label="失败时重启" />
+                            </SelectOptions>
+                        </Select>
+                    </FormItem>
+                </AntDesign.Col>
+            </Row>
+            <FormItem Label="网络">
+                <Input @bind-Value="@_request.Network" Placeholder="留空使用默认网络，或填网络名" />
+            </FormItem>
+        </TabPane>
+
+        <TabPane Key="ports" Tab="端口">
+            @foreach (var port in _request.Ports)
+            {
+                <Row Gutter="8" Style="margin-bottom: 8px;">
+                    <AntDesign.Col Span="10">
+                        <AntDesign.InputNumber @bind-Value="@port.PrivatePort" Placeholder="容器端口" Style="width: 100%" />
+                    </AntDesign.Col>
+                    <AntDesign.Col Span="10">
+                        <AntDesign.InputNumber @bind-Value="@port.PublicPort" Placeholder="宿主端口（留空则随机）" Style="width: 100%" />
+                    </AntDesign.Col>
+                    <AntDesign.Col Span="4">
+                        <Button Danger OnClick="@(() => _request.Ports.Remove(port))">删除</Button>
+                    </AntDesign.Col>
+                </Row>
+            }
+            <Button Type="@ButtonType.Dashed" OnClick="@(() => _request.Ports.Add(new PortMapping()))" Style="width: 100%;">
+                + 添加端口映射
+            </Button>
+        </TabPane>
+
+        <TabPane Key="env" Tab="环境变量">
+            @foreach (var env in _request.Env)
+            {
+                <Row Gutter="8" Style="margin-bottom: 8px;">
+                    <AntDesign.Col Span="10">
+                        <Input @bind-Value="@env.Key" Placeholder="变量名" />
+                    </AntDesign.Col>
+                    <AntDesign.Col Span="10">
+                        <Input @bind-Value="@env.Value" Placeholder="变量值" />
+                    </AntDesign.Col>
+                    <AntDesign.Col Span="4">
+                        <Button Danger OnClick="@(() => _request.Env.Remove(env))">删除</Button>
+                    </AntDesign.Col>
+                </Row>
+            }
+            <Button Type="@ButtonType.Dashed" OnClick="@(() => _request.Env.Add(new EnvironmentVariable()))" Style="width: 100%;">
+                + 添加环境变量
+            </Button>
+        </TabPane>
+
+        <TabPane Key="mounts" Tab="卷挂载">
+            @foreach (var mount in _request.Mounts)
+            {
+                <Row Gutter="8" Style="margin-bottom: 8px;">
+                    <AntDesign.Col Span="9">
+                        <Input @bind-Value="@mount.Source" Placeholder="宿主路径或卷名" />
+                    </AntDesign.Col>
+                    <AntDesign.Col Span="9">
+                        <Input @bind-Value="@mount.Destination" Placeholder="容器内路径" />
+                    </AntDesign.Col>
+                    <AntDesign.Col Span="4">
+                        <Checkbox @bind-Value="@mount.ReadOnly">只读</Checkbox>
+                    </AntDesign.Col>
+                    <AntDesign.Col Span="2">
+                        <Button Danger OnClick="@(() => _request.Mounts.Remove(mount))">×</Button>
+                    </AntDesign.Col>
+                </Row>
+            }
+            <Button Type="@ButtonType.Dashed" OnClick="@(() => _request.Mounts.Add(new VolumeMount()))" Style="width: 100%;">
+                + 添加挂载
+            </Button>
+        </TabPane>
+
+        <TabPane Key="labels" Tab="标签">
+            <Alert Type="@AlertType.Info" ShowIcon="true" Style="margin-bottom: 12px;"
+                   Message="使用 ncpm.* 标签可让面板自动发现此容器为代理站点" />
+            @foreach (var label in _labelEntries)
+            {
+                <Row Gutter="8" Style="margin-bottom: 8px;">
+                    <AntDesign.Col Span="10">
+                        <Input @bind-Value="@label.Key" Placeholder="ncpm.host" />
+                    </AntDesign.Col>
+                    <AntDesign.Col Span="10">
+                        <Input @bind-Value="@label.Value" Placeholder="app.example.com" />
+                    </AntDesign.Col>
+                    <AntDesign.Col Span="4">
+                        <Button Danger OnClick="@(() => _labelEntries.Remove(label))">删除</Button>
+                    </AntDesign.Col>
+                </Row>
+            }
+            <Button Type="@ButtonType.Dashed" OnClick="@(() => _labelEntries.Add(new EnvironmentVariable()))" Style="width: 100%;">
+                + 添加标签
+            </Button>
+        </TabPane>
+    </Tabs>
+
+    <Divider />
+    <Button Type="@ButtonType.Primary" Size="@ButtonSize.Large" OnClick="Create" Loading="@_creating">
+        创建并启动
+    </Button>
+</Form>
+
+@code {
+    private List<DockerHost> _hosts = new();
+    private CreateContainerRequest _request = new();
+    private List<EnvironmentVariable> _labelEntries = new();
+    private bool _creating;
+
+    // Reuse EnvironmentVariable as a key/value entry since labels are string,string too.
+    private class LabelEntry { public string Key { get; set; } = ""; public string Value { get; set; } = ""; }
+
+    protected override void OnInitialized()
+    {
+        _hosts = DockerService.GetAllHosts();
+        _request.HostId = _hosts.FirstOrDefault(h => h.IsDefault)?.Id ?? string.Empty;
+        _request.RestartPolicy = "no";
+    }
+
+    private async Task Create()
+    {
+        if (string.IsNullOrWhiteSpace(_request.Name) || string.IsNullOrWhiteSpace(_request.Image))
+        {
+            Message.Error("请填写容器名称和镜像");
+            return;
+        }
+
+        // Fold label entries into the request dictionary.
+        _request.Labels = _labelEntries
+            .Where(l => !string.IsNullOrWhiteSpace(l.Key))
+            .ToDictionary(l => l.Key, l => l.Value ?? string.Empty);
+
+        _creating = true;
+        try
+        {
+            if (await DockerService.CreateAndStartContainerAsync(_request))
+            {
+                Message.Success("容器已创建并启动");
+                Navigation.NavigateTo("/docker/containers");
+            }
+            else
+            {
+                Message.Error("创建失败，请检查日志");
+            }
+        }
+        finally
+        {
+            _creating = false;
+        }
+    }
+
+    private void GoBack()
+    {
+        Navigation.NavigateTo("/docker/containers");
+    }
+}

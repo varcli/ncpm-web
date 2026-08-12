@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text;
 using Docker.DotNet;
 using Docker.DotNet.Models;
 using Ncpm.Data;
@@ -224,6 +225,16 @@ public class DockerService : IDisposable
     public DockerHost? GetDefaultHost()
     {
         return _hosts.FirstOrDefault(h => h.IsDefault && h.IsEnabled);
+    }
+
+    /// <summary>
+    /// Returns the shared <see cref="DockerClient"/> for a host, or null when the
+    /// host is disabled or never connected. Lets background services reuse the
+    /// pooled connection rather than creating their own.
+    /// </summary>
+    public DockerClient? GetClient(string hostId)
+    {
+        return _clients.TryGetValue(hostId, out var client) ? client : null;
     }
 
     public DockerHostStatus? GetHostStatus(string hostId)
@@ -472,6 +483,40 @@ public class DockerService : IDisposable
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to get container {ContainerId} from {Host}", containerId, host.Name);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Returns the raw inspect response so callers that need network aliases,
+    /// endpoint settings or mount details — fields not surfaced on
+    /// <see cref="DockerContainer"/> — can read them without re-inspecting.
+    /// </summary>
+    public async Task<ContainerInspectResponse?> InspectContainerAsync(
+        string containerId, string? hostId = null, CancellationToken cancellationToken = default)
+    {
+        var hosts = string.IsNullOrEmpty(hostId)
+            ? _hosts.Where(h => h.IsEnabled).ToList()
+            : _hosts.Where(h => h.Id == hostId && h.IsEnabled).ToList();
+
+        foreach (var host in hosts)
+        {
+            if (!_clients.TryGetValue(host.Id, out var client))
+                continue;
+
+            try
+            {
+                return await client.Containers.InspectContainerAsync(containerId, cancellationToken);
+            }
+            catch (DockerContainerNotFoundException)
+            {
+                continue;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to inspect container {ContainerId} from {Host}", containerId, host.Name);
             }
         }
 
@@ -838,6 +883,543 @@ public class DockerService : IDisposable
 
     #endregion
 
+    #region Network Operations
+
+    public async Task<List<DockerNetwork>> ListNetworksAsync(string? hostId = null, CancellationToken cancellationToken = default)
+    {
+        var hosts = string.IsNullOrEmpty(hostId)
+            ? _hosts.Where(h => h.IsEnabled).ToList()
+            : _hosts.Where(h => h.Id == hostId && h.IsEnabled).ToList();
+
+        var allNetworks = new List<DockerNetwork>();
+
+        foreach (var host in hosts)
+        {
+            if (!_clients.TryGetValue(host.Id, out var client))
+                continue;
+
+            try
+            {
+                var networks = await client.Networks.ListNetworksAsync(
+                    new NetworksListParameters(), cancellationToken);
+
+                foreach (var n in networks)
+                {
+                    var subnet = n.IPAM?.Config?.FirstOrDefault()?.Subnet;
+                    var gateway = n.IPAM?.Config?.FirstOrDefault()?.Gateway;
+
+                    allNetworks.Add(new DockerNetwork
+                    {
+                        Id = n.ID,
+                        Name = n.Name,
+                        Driver = n.Driver,
+                        Scope = n.Scope,
+                        Created = n.Created,
+                        Subnet = subnet,
+                        Gateway = gateway,
+                        Internal = n.Internal,
+                        EnableIpv6 = n.EnableIPv6,
+                        Labels = n.Labels?.ToDictionary(l => l.Key, l => l.Value) ?? new(),
+                        ConnectedContainers = n.Containers?.Values
+                            .Select(c => c.Name?.TrimStart('/') ?? c.EndpointID ?? "unknown")
+                            .ToList() ?? new(),
+                        HostId = host.Id,
+                        HostName = host.Name
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to list networks from {Host}", host.Name);
+            }
+        }
+
+        return allNetworks;
+    }
+
+    public async Task<bool> DeleteNetworkAsync(string networkId, string hostId, CancellationToken cancellationToken = default)
+    {
+        if (!_clients.TryGetValue(hostId, out var client))
+            return false;
+
+        try
+        {
+            await client.Networks.DeleteNetworkAsync(networkId, cancellationToken);
+            _logger.LogInformation("Deleted network {NetworkId} on {Host}", networkId, hostId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to delete network {NetworkId} on {Host}", networkId, hostId);
+            return false;
+        }
+    }
+
+    public async Task<bool> CreateNetworkAsync(string name, string driver, string hostId, CancellationToken cancellationToken = default)
+    {
+        if (!_clients.TryGetValue(hostId, out var client))
+            return false;
+
+        try
+        {
+            await client.Networks.CreateNetworkAsync(new NetworksCreateParameters
+            {
+                Name = name,
+                Driver = string.IsNullOrEmpty(driver) ? "bridge" : driver
+            }, cancellationToken);
+            _logger.LogInformation("Created network {Name} on {Host}", name, hostId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to create network {Name} on {Host}", name, hostId);
+            return false;
+        }
+    }
+
+    #endregion
+
+    #region Volume Operations
+
+    public async Task<List<DockerVolume>> ListVolumesAsync(string? hostId = null, CancellationToken cancellationToken = default)
+    {
+        var hosts = string.IsNullOrEmpty(hostId)
+            ? _hosts.Where(h => h.IsEnabled).ToList()
+            : _hosts.Where(h => h.Id == hostId && h.IsEnabled).ToList();
+
+        var allVolumes = new List<DockerVolume>();
+
+        foreach (var host in hosts)
+        {
+            if (!_clients.TryGetValue(host.Id, out var client))
+                continue;
+
+            try
+            {
+                var response = await client.Volumes.ListAsync(cancellationToken);
+
+                foreach (var v in response.Volumes ?? new List<VolumeResponse>())
+                {
+                    allVolumes.Add(new DockerVolume
+                    {
+                        Name = v.Name,
+                        Driver = v.Driver,
+                        Mountpoint = v.Mountpoint,
+                        CreatedAt = ParseVolumeCreatedAt(v.CreatedAt),
+                        Labels = v.Labels?.ToDictionary(l => l.Key, l => l.Value) ?? new(),
+                        HostId = host.Id,
+                        HostName = host.Name
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to list volumes from {Host}", host.Name);
+            }
+        }
+
+        return allVolumes;
+    }
+
+    /// <summary>
+    /// Volume timestamps arrive as RFC3339 strings rather than as a parsed
+    /// <see cref="DateTime"/> like the other Docker.DotNet responses. Returns null
+    /// when the value is absent or unparseable, so the volumes page can show "-"
+    /// instead of a bogus 0001-01-01.
+    /// </summary>
+    private static DateTime? ParseVolumeCreatedAt(string? value) =>
+        DateTime.TryParse(
+            value,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal |
+            System.Globalization.DateTimeStyles.AssumeUniversal,
+            out var parsed)
+            ? parsed
+            : null;
+
+    public async Task<bool> DeleteVolumeAsync(string volumeName, string hostId, bool force = false, CancellationToken cancellationToken = default)
+    {
+        if (!_clients.TryGetValue(hostId, out var client))
+            return false;
+
+        try
+        {
+            await client.Volumes.RemoveAsync(volumeName, force, cancellationToken);
+            _logger.LogInformation("Removed volume {Name} on {Host}", volumeName, hostId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to remove volume {Name} on {Host}", volumeName, hostId);
+            return false;
+        }
+    }
+
+    public async Task<bool> CreateVolumeAsync(string name, string driver, string hostId, CancellationToken cancellationToken = default)
+    {
+        if (!_clients.TryGetValue(hostId, out var client))
+            return false;
+
+        try
+        {
+            await client.Volumes.CreateAsync(new VolumesCreateParameters
+            {
+                Name = name,
+                Driver = string.IsNullOrEmpty(driver) ? "local" : driver
+            }, cancellationToken);
+            _logger.LogInformation("Created volume {Name} on {Host}", name, hostId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to create volume {Name} on {Host}", name, hostId);
+            return false;
+        }
+    }
+
+    #endregion
+
+    #region Container Exec
+
+    /// <summary>
+    /// Runs a one-shot <c>docker exec</c> and returns the captured stdout/stderr.
+    /// This is non-interactive: no PTY, no streaming input. A full terminal
+    /// emulator would need a JS client and a bidirectional signalr channel, which
+    /// is out of scope for a control panel.
+    /// </summary>
+    public async Task<ContainerExecResult> ExecAsync(
+        string containerId,
+        string hostId,
+        string command,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_clients.TryGetValue(hostId, out var client))
+            return new ContainerExecResult { Success = false, Error = "主机未连接" };
+
+        try
+        {
+            // Split the command string the way a shell would, so the user can type
+            // "ls -la /app" rather than passing an array. The exec API takes each
+            // token as a separate argv element.
+            var cmdParts = command.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+            var createParams = new ContainerExecCreateParameters
+            {
+                AttachStdout = true,
+                AttachStderr = true,
+                Cmd = cmdParts
+            };
+
+            var exec = await client.Exec.ExecCreateContainerAsync(containerId, createParams, cancellationToken);
+
+            using var stream = await client.Exec.StartAndAttachContainerExecAsync(exec.ID, false, cancellationToken);
+            var (stdout, stderr) = await stream.ReadOutputToEndAsync(cancellationToken);
+
+            var inspect = await client.Exec.InspectContainerExecAsync(exec.ID, cancellationToken);
+
+            var output = new StringBuilder();
+            if (!string.IsNullOrEmpty(stdout))
+                output.Append(stdout);
+            if (!string.IsNullOrEmpty(stderr))
+            {
+                if (output.Length > 0)
+                    output.AppendLine();
+                output.Append(stderr);
+            }
+
+            return new ContainerExecResult
+            {
+                Success = inspect.ExitCode == 0,
+                ExitCode = inspect.ExitCode,
+                Output = output.ToString()
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exec failed in {ContainerId} on {Host}", containerId, hostId);
+            return new ContainerExecResult { Success = false, Error = ex.Message };
+        }
+    }
+
+    #endregion
+
+    #region Create Container
+
+    public async Task<bool> CreateAndStartContainerAsync(
+        CreateContainerRequest request, CancellationToken cancellationToken = default)
+    {
+        if (!_clients.TryGetValue(request.HostId, out var client))
+            return false;
+
+        try
+        {
+            var createParams = new CreateContainerParameters
+            {
+                Name = request.Name,
+                Image = request.Image,
+                Env = request.Env.Select(e => $"{e.Key}={e.Value}").ToList(),
+                Labels = request.Labels,
+                HostConfig = new HostConfig
+                {
+                    PortBindings = request.Ports
+                        .Where(p => p.PublicPort.HasValue)
+                        .GroupBy(p => $"{p.PrivatePort}/{p.Type?.ToLowerInvariant() ?? "tcp"}")
+                        .ToDictionary(
+                            g => g.Key,
+                            g => g.Select(p => new PortBinding { HostPort = p.PublicPort!.Value.ToString() }).ToList()
+                                as IList<PortBinding>),
+                    Binds = request.Mounts
+                        .Select(m => m.ReadOnly
+                            ? $"{m.Source}:{m.Destination}:ro"
+                            : $"{m.Source}:{m.Destination}")
+                        .ToList(),
+                    RestartPolicy = new RestartPolicy
+                    {
+                        Name = request.RestartPolicy switch
+                        {
+                            "always" => RestartPolicyKind.Always,
+                            "unless-stopped" => RestartPolicyKind.UnlessStopped,
+                            "on-failure" => RestartPolicyKind.OnFailure,
+                            _ => RestartPolicyKind.No
+                        }
+                    },
+                    NetworkMode = request.Network
+                }
+            };
+
+            if (!string.IsNullOrEmpty(request.Network))
+            {
+                createParams.NetworkingConfig = new NetworkingConfig
+                {
+                    EndpointsConfig = new Dictionary<string, EndpointSettings>
+                    {
+                        [request.Network] = new EndpointSettings()
+                    }
+                };
+            }
+
+            var created = await client.Containers.CreateContainerAsync(createParams, cancellationToken);
+            await client.Containers.StartContainerAsync(created.ID, new ContainerStartParameters(), cancellationToken);
+            _logger.LogInformation("Created and started container {Name} on {Host}", request.Name, request.HostId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to create container {Name} on {Host}", request.Name, request.HostId);
+            return false;
+        }
+    }
+
+    #endregion
+
+    #region Pull Progress
+
+    /// <summary>
+    /// Pulls an image, invoking <paramref name="progress"/> for each layer event
+    /// so the UI can show per-layer download status. Each <see cref="JSONMessage"/>
+    /// carries a layer id, status string and current/total bytes.
+    /// </summary>
+    public async Task<bool> PullImageWithProgressAsync(
+        string repository,
+        string tag,
+        string hostId,
+        IProgress<JSONMessage>? progress,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_clients.TryGetValue(hostId, out var client))
+            return false;
+
+        try
+        {
+            var progressHandler = progress != null
+                ? new Progress<JSONMessage>(progress.Report)
+                : new Progress<JSONMessage>();
+
+            await client.Images.CreateImageAsync(
+                new ImagesCreateParameters { FromImage = repository, Tag = tag },
+                null,
+                progressHandler,
+                cancellationToken);
+            _logger.LogInformation("Pulled image {Repository}:{Tag} on {Host}", repository, tag, hostId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to pull image {Repository}:{Tag} on {Host}", repository, tag, hostId);
+            return false;
+        }
+    }
+
+    #endregion
+
+    #region System Df & Prune
+
+    public async Task<List<DockerSystemDf>> SystemDfAsync(string? hostId = null, CancellationToken cancellationToken = default)
+    {
+        var hosts = string.IsNullOrEmpty(hostId)
+            ? _hosts.Where(h => h.IsEnabled).ToList()
+            : _hosts.Where(h => h.Id == hostId && h.IsEnabled).ToList();
+
+        var rows = new List<DockerSystemDf>();
+
+        foreach (var host in hosts)
+        {
+            if (!_clients.TryGetValue(host.Id, out var client))
+                continue;
+
+            try
+            {
+                var data = await client.System.GetSystemInfoAsync(cancellationToken);
+
+                // The Docker API does not expose `system df` directly via the typed
+                // client; surface host-level summary instead so the prune page has
+                // something actionable.
+                rows.Add(new DockerSystemDf
+                {
+                    Category = $"主机: {host.Name}",
+                    Total = $"{data.Containers}",
+                    Active = $"{data.ContainersRunning}",
+                    Reclaimable = "见下方清理预览",
+                    TotalBytes = data.Containers
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "system df failed on {Host}", host.Name);
+            }
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Previews what a prune of the given category would remove, without deleting
+    /// anything. Lists the objects so the user can confirm before committing.
+    /// </summary>
+    public async Task<PrunePreview> PrunePreviewAsync(string category, string? hostId = null, CancellationToken cancellationToken = default)
+    {
+        var preview = new PrunePreview { Category = category };
+        var hosts = string.IsNullOrEmpty(hostId)
+            ? _hosts.Where(h => h.IsEnabled).ToList()
+            : _hosts.Where(h => h.Id == hostId && h.IsEnabled).ToList();
+
+        foreach (var host in hosts)
+        {
+            if (!_clients.TryGetValue(host.Id, out var client))
+                continue;
+
+            try
+            {
+                switch (category.ToLowerInvariant())
+                {
+                    case "container":
+                        var stopped = await client.Containers.ListContainersAsync(
+                            new ContainersListParameters { All = true, Filters = new Dictionary<string, IDictionary<string, bool>>
+                            {
+                                ["status"] = new Dictionary<string, bool> { ["exited"] = true, ["dead"] = true }
+                            }}, cancellationToken);
+                        preview.Items.AddRange(stopped.Select(c => c.Names.FirstOrDefault()?.TrimStart('/') ?? c.ID[..12]));
+                        break;
+
+                    case "image":
+                        var dangling = await client.Images.ListImagesAsync(
+                            new ImagesListParameters
+                            {
+                                Filters = new Dictionary<string, IDictionary<string, bool>>
+                                {
+                                    ["dangling"] = new Dictionary<string, bool> { ["true"] = true }
+                                }
+                            }, cancellationToken);
+                        preview.Items.AddRange(dangling.Select(i => i.RepoTags?.FirstOrDefault() ?? i.ID[..19]));
+                        break;
+
+                    case "volume":
+                        var volumes = await client.Volumes.ListAsync(new VolumesListParameters
+                        {
+                            Filters = new Dictionary<string, IDictionary<string, bool>>
+                            {
+                                ["dangling"] = new Dictionary<string, bool> { ["true"] = true }
+                            }
+                        }, cancellationToken);
+                        preview.Items.AddRange((volumes.Volumes ?? new List<VolumeResponse>()).Select(v => v.Name));
+                        break;
+
+                    case "network":
+                        var networks = await client.Networks.ListNetworksAsync(
+                            new NetworksListParameters(), cancellationToken);
+                        // Only user-defined networks with no connected containers are prunable.
+                        preview.Items.AddRange(networks
+                            .Where(n => !string.Equals(n.Driver, "bridge", StringComparison.Ordinal)
+                                     && !string.Equals(n.Driver, "host", StringComparison.Ordinal)
+                                     && !string.Equals(n.Driver, "none", StringComparison.Ordinal)
+                                     && (n.Containers == null || n.Containers.Count == 0))
+                            .Select(n => n.Name));
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Prune preview failed for {Category} on {Host}", category, host.Name);
+            }
+        }
+
+        preview.Count = preview.Items.Count;
+        return preview;
+    }
+
+    public async Task<PruneResult> PruneAsync(string category, string? hostId = null, CancellationToken cancellationToken = default)
+    {
+        var result = new PruneResult { Category = category };
+        var hosts = string.IsNullOrEmpty(hostId)
+            ? _hosts.Where(h => h.IsEnabled).ToList()
+            : _hosts.Where(h => h.Id == hostId && h.IsEnabled).ToList();
+
+        foreach (var host in hosts)
+        {
+            if (!_clients.TryGetValue(host.Id, out var client))
+                continue;
+
+            try
+            {
+                switch (category.ToLowerInvariant())
+                {
+                    case "container":
+                        await client.Containers.PruneContainersAsync(new ContainersPruneParameters(), cancellationToken);
+                        break;
+                    case "image":
+                        await client.Images.PruneImagesAsync(new ImagesPruneParameters
+                        {
+                            Filters = new Dictionary<string, IDictionary<string, bool>>
+                            {
+                                ["dangling"] = new Dictionary<string, bool> { ["true"] = true }
+                            }
+                        }, cancellationToken);
+                        break;
+                    case "volume":
+                        await client.Volumes.PruneAsync(new VolumesPruneParameters(), cancellationToken);
+                        break;
+                    case "network":
+                        // The parameters type is optional and its name differs across
+                        // Docker.DotNet versions, so let the default apply.
+                        await client.Networks.PruneNetworksAsync(cancellationToken: cancellationToken);
+                        break;
+                }
+
+                result.Success = true;
+                _logger.LogInformation("Pruned {Category} on {Host}", category, host.Name);
+            }
+            catch (Exception ex)
+            {
+                result.Error = ex.Message;
+                _logger.LogError(ex, "Prune {Category} failed on {Host}", category, host.Name);
+            }
+        }
+
+        return result;
+    }
+
+    #endregion
+
     public void Dispose()
     {
         if (!_disposed)
@@ -850,4 +1432,13 @@ public class DockerService : IDisposable
             _disposed = true;
         }
     }
+}
+
+/// <summary>Result of a one-shot docker exec invocation.</summary>
+public class ContainerExecResult
+{
+    public bool Success { get; set; }
+    public long ExitCode { get; set; }
+    public string Output { get; set; } = string.Empty;
+    public string? Error { get; set; }
 }

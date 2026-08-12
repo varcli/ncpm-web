@@ -61,12 +61,43 @@
                 <FormItem Label="激活路径">
                     <Input @bind-Value="@_config.Nginx.ActivePath" />
                 </FormItem>
+                <FormItem Label="Stream 路径（TCP/UDP 站点）">
+                    <Input @bind-Value="@_config.Nginx.StreamPath" />
+                </FormItem>
                 <FormItem Label="证书路径">
                     <Input @bind-Value="@_config.Nginx.CertPath" />
                 </FormItem>
                 <FormItem Label="可执行文件路径">
                     <Input @bind-Value="@_config.Nginx.ExecutablePath" />
                 </FormItem>
+            </Form>
+        </Card>
+    </TabPane>
+
+    <TabPane Key="9" Tab="Compose">
+        <Card Title="Compose 编排设置">
+            <Form Model="@_config.Compose" Layout="@FormLayout.Vertical">
+                <FormItem Label="应用栈目录">
+                    <Input @bind-Value="@_config.Compose.StacksPath" Placeholder="data/compose" />
+                </FormItem>
+                <Row Gutter="16">
+                    <AntDesign.Col Span="12">
+                        <FormItem Label="docker 可执行文件">
+                            <Input @bind-Value="@_config.Compose.DockerExecutablePath" Placeholder="docker" />
+                        </FormItem>
+                    </AntDesign.Col>
+                    <AntDesign.Col Span="12">
+                        <FormItem Label="命令超时（秒）">
+                            <AntDesign.InputNumber @bind-Value="@_config.Compose.CommandTimeout" Style="width: 100%" />
+                        </FormItem>
+                    </AntDesign.Col>
+                </Row>
+                <FormItem Label="宿主机路径前缀">
+                    <Input @bind-Value="@_config.Compose.HostPathPrefix" Placeholder="/opt/ncpm/data/compose" />
+                </FormItem>
+                <Alert Type="@AlertType.Info" ShowIcon="true"
+                       Message="为什么需要宿主机路径前缀"
+                       Description="Docker 守护进程在宿主机上解析相对 bind mount，而面板容器内的路径在宿主机上通常并不存在。把上面的「应用栈目录」在宿主机上的实际挂载路径填在这里，相对 bind mount 才会落到预期位置；留空则原样传递容器内路径。" />
             </Form>
         </Card>
     </TabPane>

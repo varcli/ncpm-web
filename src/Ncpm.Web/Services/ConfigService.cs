@@ -204,6 +204,42 @@ public class ConfigService : IDisposable
         return hosts;
     }
 
+    /// <summary>
+    /// Loads discovered hosts from the separate discovered-hosts directory so
+    /// callers can merge them with manual hosts for a single UI list.
+    /// </summary>
+    public List<ProxyHostConfig> LoadDiscoveredProxyHosts()
+    {
+        var hosts = new List<ProxyHostConfig>();
+        var dir = Path.Combine(_configPath, "discovered-hosts");
+        if (!Directory.Exists(dir))
+            return hosts;
+
+        foreach (var file in Directory.GetFiles(dir, "*.yml"))
+        {
+            try
+            {
+                var content = File.ReadAllText(file);
+                var host = _deserializer.Deserialize<ProxyHostConfig>(content);
+                if (host != null)
+                    hosts.Add(host);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to load discovered host from {File}", file);
+            }
+        }
+
+        return hosts;
+    }
+
+    /// <summary>Exposes the YAML serializer for callers writing hosts outside the manual directory.</summary>
+    public string SerializeProxyHost(ProxyHostConfig host) => _serializer.Serialize(host);
+
+    /// <summary>Exposes the YAML deserializer for callers reading host files directly.</summary>
+    public ProxyHostConfig? DeserializeProxyHost(string content)
+        => string.IsNullOrEmpty(content) ? null : _deserializer.Deserialize<ProxyHostConfig>(content);
+
     public ProxyHostConfig? LoadProxyHost(string id)
     {
         var filePath = Path.Combine(_proxyHostsPath, $"{id}.yml");

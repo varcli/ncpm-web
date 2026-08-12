@@ -1,0 +1,163 @@
+@page "/docker/networks"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@inject DockerService DockerService
+@inject IMessageService Message
+
+<PageHeader Title="Docker 网络" Subtitle="管理容器网络">
+    <PageHeaderExtra>
+        <Select @bind-Value="@_selectedHostId" TItem="string" TItemValue="string"
+                Placeholder="全部主机" Style="width: 200px; margin-right: 8px;" AllowClear>
+            <SelectOptions>
+                @foreach (var host in _hosts)
+                {
+                    <SelectOption TItem="string" TItemValue="string" Value="@host.Id" Label="@host.Name" />
+                }
+            </SelectOptions>
+        </Select>
+        <Button Type="@ButtonType.Primary" Icon="@IconType.Outline.Plus" OnClick="() => _createVisible = true">新建网络</Button>
+        <Button Icon="@IconType.Outline.Reload" OnClick="Refresh">刷新</Button>
+    </PageHeaderExtra>
+</PageHeader>
+
+<Spin Spinning="@_loading">
+    <Table TItem="DockerNetwork" DataSource="@_networks" RowKey="x => x.Id">
+        <PropertyColumn Property="n => n.Name" Title="名称" />
+        <PropertyColumn Property="n => n.Driver" Title="驱动" Width="100" />
+        <PropertyColumn Property="n => n.Scope" Title="范围" Width="80" />
+        <PropertyColumn Property="n => n.Subnet" Title="子网" Width="160" />
+        <PropertyColumn Property="n => n.ConnectedContainers" Title="已连接容器">
+            @if (context.ConnectedContainers.Count == 0)
+            {
+                <span style="color: #999;">-</span>
+            }
+            else
+            {
+                @foreach (var c in context.ConnectedContainers.Take(4))
+                {
+                    <Tag>@c</Tag>
+                }
+                @if (context.ConnectedContainers.Count > 4)
+                {
+                    <Tag>+@(context.ConnectedContainers.Count - 4)</Tag>
+                }
+            }
+        </PropertyColumn>
+        <PropertyColumn Property="n => n.HostName" Title="主机" Width="120">
+            <Tag>@context.HostName</Tag>
+        </PropertyColumn>
+        <ActionColumn Title="操作" Width="120">
+            <Popconfirm Title="确认删除此网络？已连接容器的将先断开。" OnConfirm="() => Delete(context.Id, context.HostId)">
+                <Button Size="@ButtonSize.Small" Danger Icon="@IconType.Outline.Delete"
+                        Disabled="@(context.ConnectedContainers.Count > 0 || context.Driver is "bridge" or "host" or "none")">
+                    删除
+                </Button>
+            </Popconfirm>
+        </ActionColumn>
+    </Table>
+</Spin>
+
+<Modal Title="新建网络" @bind-Visible="@_createVisible" Width="500" OnOk="CreateNetwork" OnCancel="() => _createVisible = false">
+    <Form Model="@this" Layout="@FormLayout.Vertical">
+        <FormItem Label="名称">
+            <Input @bind-Value="@_newName" Placeholder="my-network" />
+        </FormItem>
+        <FormItem Label="驱动">
+            <Select @bind-Value="@_newDriver" TItem="string" TItemValue="string">
+                <SelectOptions>
+                    <SelectOption TItem="string" TItemValue="string" Value="@("bridge")" Label="bridge" />
+                    <SelectOption TItem="string" TItemValue="string" Value="@("overlay")" Label="overlay" />
+                    <SelectOption TItem="string" TItemValue="string" Value="@("macvlan")" Label="macvlan" />
+                </SelectOptions>
+            </Select>
+        </FormItem>
+        <FormItem Label="目标主机">
+            <Select @bind-Value="@_newHostId" TItem="string" TItemValue="string" Placeholder="默认主机">
+                <SelectOptions>
+                    @foreach (var host in _hosts.Where(h => h.IsEnabled))
+                    {
+                        <SelectOption TItem="string" TItemValue="string" Value="@host.Id" Label="@host.Name" />
+                    }
+                </SelectOptions>
+            </Select>
+        </FormItem>
+    </Form>
+</Modal>
+
+@code {
+    private List<DockerNetwork> _networks = new();
+    private List<DockerHost> _hosts = new();
+    private bool _loading = true;
+    private string? _selectedHostId;
+
+    private bool _createVisible;
+    private string _newName = string.Empty;
+    private string _newDriver = "bridge";
+    private string? _newHostId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _hosts = DockerService.GetAllHosts();
+        await Refresh();
+    }
+
+    private async Task Refresh()
+    {
+        _loading = true;
+        try
+        {
+            _networks = await DockerService.ListNetworksAsync(_selectedHostId);
+        }
+        catch (Exception ex)
+        {
+            Message.Error($"加载失败: {ex.Message}");
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task Delete(string id, string hostId)
+    {
+        if (await DockerService.DeleteNetworkAsync(id, hostId))
+        {
+            Message.Success("网络已删除");
+            await Refresh();
+        }
+        else
+        {
+            Message.Error("删除失败");
+        }
+    }
+
+    private void OpenCreate()
+    {
+        _newName = string.Empty;
+        _newDriver = "bridge";
+        _newHostId = _hosts.FirstOrDefault(h => h.IsDefault)?.Id;
+        _createVisible = true;
+    }
+
+    private async Task CreateNetwork()
+    {
+        if (string.IsNullOrWhiteSpace(_newName) || string.IsNullOrEmpty(_newHostId))
+        {
+            Message.Error("请填写名称并选择主机");
+            return;
+        }
+
+        if (await DockerService.CreateNetworkAsync(_newName, _newDriver, _newHostId))
+        {
+            Message.Success("网络已创建");
+            _createVisible = false;
+            await Refresh();
+        }
+        else
+        {
+            Message.Error("创建失败");
+        }
+    }
+}

@@ -1,0 +1,125 @@
+@page "/proxy/discovered"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@inject LabelDiscoveryService DiscoveryService
+@inject IMessageService Message
+
+<PageHeader Title="自动发现站点" Subtitle="由容器 ncpm.* 标签自动生成的代理站点">
+    <PageHeaderExtra>
+        <Switch @bind-Value="@_enabled" OnChange="OnToggleEnabled" CheckedChildren="启用" UnCheckedChildren="停用" />
+        <Button Icon="@IconType.Outline.Reload" OnClick="Refresh">刷新</Button>
+    </PageHeaderExtra>
+</PageHeader>
+
+<Alert Type="@AlertType.Info" ShowIcon="true" Style="margin-bottom: 16px;"
+       Message="标签驱动自动发现"
+       Description="为容器添加 ncpm.enable=true、ncpm.host=app.example.com、ncpm.port=8080 即可自动生成代理站点并发布到 Nginx。可选：ncpm.scheme、ncpm.tls、ncpm.websocket、ncpm.preserve_host、ncpm.network（指定走哪个 Docker 网络）、ncpm.healthcheck.path / .interval / .timeout / .disable。ncpm.exclude=true 可排除容器；ncpm.aliases=web,api 可让一个容器暴露多条路由，每条用 ncpm.<别名>.host / .port 单独配置，未加前缀的标签作为共同默认值。发现的站点与手工站点分开存放，不会互相覆盖；域名冲突时手工站点优先，冲突的发现站点会标红且不发布。" />
+
+@if (!_enabled)
+{
+    <Alert Type="@AlertType.Warning" ShowIcon="true" Message="自动发现已停用" Description="启用后将开始扫描容器标签。" />
+}
+
+<Spin Spinning="@_loading">
+    <Table TItem="DiscoveredProxyHost" DataSource="@_hosts" RowKey="x => x.HostId">
+        <PropertyColumn Property="d => d.Config.Id" Title="ID" Width="140" />
+        <PropertyColumn Property="d => d.Config.Hosts" Title="域名">
+            @foreach (var host in context.Config.Hosts)
+            {
+                <Tag>@host</Tag>
+            }
+            @if (context.HasConflict)
+            {
+                <Tag Color="@("red")" Style="margin-left: 4px;">冲突: @context.ConflictWith</Tag>
+            }
+        </PropertyColumn>
+        <PropertyColumn Property="d => d.Config.Scheme" Title="类型" Width="100">
+            <Tag>@DisplayText.ProxyScheme(context.Config.Scheme)</Tag>
+        </PropertyColumn>
+        <PropertyColumn Property="d => d.Config.Upstreams" Title="目标" Width="240">
+            @if (context.Config.Upstreams.Any())
+            {
+                <Tag>@context.Config.Upstreams[0].Url</Tag>
+            }
+        </PropertyColumn>
+        <PropertyColumn Property="d => d.ContainerName" Title="来源容器" Width="180">
+            <Tag>@(string.IsNullOrEmpty(context.ContainerName) ? "-" : context.ContainerName)</Tag>
+            @if (!string.IsNullOrEmpty(context.Alias))
+            {
+                <Tag Color="@("cyan")" Style="margin-left: 4px;">@context.Alias</Tag>
+            }
+            @if (!string.IsNullOrEmpty(context.ComposeProject))
+            {
+                <Tag Color="@("purple")" Style="margin-left: 4px;">@context.ComposeProject</Tag>
+            }
+        </PropertyColumn>
+        <ActionColumn Title="操作" Width="180">
+            <Space>
+                <SpaceItem>
+                    <Popconfirm Title="转为手工站点？将脱离标签自动管理。" OnConfirm="() => Promote(context.HostId)">
+                        <Button Size="@ButtonSize.Small" Type="@ButtonType.Link">转为手工</Button>
+                    </Popconfirm>
+                </SpaceItem>
+            </Space>
+        </ActionColumn>
+    </Table>
+</Spin>
+
+@code {
+    private List<DiscoveredProxyHost> _hosts = new();
+    private bool _loading = true;
+    private bool _enabled = true;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _enabled = DiscoveryService.Enabled;
+        await Refresh();
+    }
+
+    private async Task Refresh()
+    {
+        _loading = true;
+        try
+        {
+            _hosts = DiscoveryService.ListDiscovered();
+        }
+        catch (Exception ex)
+        {
+            Message.Error($"加载失败: {ex.Message}");
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task OnToggleEnabled(bool enabled)
+    {
+        DiscoveryService.Enabled = enabled;
+        if (enabled)
+        {
+            await DiscoveryService.SweepAsync();
+            await Refresh();
+            Message.Success("已启用自动发现");
+        }
+        else
+        {
+            Message.Info("已停用自动发现，已生成的站点保留但不再更新");
+        }
+    }
+
+    private async Task Promote(string hostId)
+    {
+        if (await DiscoveryService.PromoteAsync(hostId))
+        {
+            Message.Success("已转为手工站点");
+            await Refresh();
+        }
+        else
+        {
+            Message.Error("转换失败");
+        }
+    }
+}

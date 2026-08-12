@@ -1,0 +1,274 @@
+@page "/compose/{Name}"
+@using Microsoft.AspNetCore.Authorization
+@using Ncpm.Data
+@using Ncpm.Services
+@attribute [Authorize]
+@inject ComposeService ComposeService
+@inject DockerService DockerService
+@inject IMessageService Message
+@inject NavigationManager Navigation
+
+<PageHeader Title="@($"应用栈: {Project?.Name ?? Name}")" Subtitle="编辑 compose 配置并管理服务">
+    <PageHeaderExtra>
+        <Button Icon="@IconType.Outline.ArrowLeft" OnClick="GoBack">返回</Button>
+        <Button Icon="@IconType.Outline.Reload" OnClick="Refresh">刷新</Button>
+    </PageHeaderExtra>
+</PageHeader>
+
+@if (Project == null)
+{
+    <Spin Spinning="@_loading" />
+}
+else
+{
+    @if (!Project.IsManaged)
+    {
+        <Alert Type="@AlertType.Info" ShowIcon="true" Message="外部应用栈"
+               Description="此应用栈由容器标签发现，面板不持有其 compose 文件，仅支持生命周期操作。如需编辑请转为托管。" />
+    }
+    @if (ComposeService.HasBindMountCaveat)
+    {
+        <Alert Type="@AlertType.Warning" ShowIcon="true" Message="Bind mount 路径提醒"
+               Description="未配置 Compose.HostPathPrefix。YAML 中的相对 bind mount 会以面板容器内路径为基准，宿主机上可能不存在该目录。建议使用命名卷，或在系统设置配置宿主机路径前缀。" />
+    }
+
+    <Tabs DefaultActiveKey="services">
+        <TabPane Key="services" Tab="服务">
+            <Table TItem="ComposeServiceInfo" DataSource="@Project.Services" RowKey="x => x.Name">
+                <PropertyColumn Property="s => s.Name" Title="服务" />
+                <PropertyColumn Property="s => s.Image" Title="镜像" />
+                <PropertyColumn Property="s => s.State" Title="状态" Width="100">
+                    <Tag Color="@(context.IsRunning ? "green" : "default")">
+                        @DisplayText.ContainerState(context.State)
+                    </Tag>
+                </PropertyColumn>
+                <PropertyColumn Property="s => s.Status" Title="状态详情" />
+                <PropertyColumn Property="s => s.Ports" Title="端口">
+                    @foreach (var port in context.Ports.Where(p => p.PublicPort.HasValue).Take(4))
+                    {
+                        <Tag>@port.PublicPort:@port.PrivatePort</Tag>
+                    }
+                </PropertyColumn>
+                <ActionColumn Title="操作" Width="240">
+                    <Space>
+                        <SpaceItem>
+                            <Button Size="@ButtonSize.Small" OnClick="@(() => ServiceAction(context.Name, "start"))">启动</Button>
+                        </SpaceItem>
+                        <SpaceItem>
+                            <Popconfirm Title="停止此服务？" OnConfirm='() => ServiceAction(context.Name, "stop")'>
+                                <Button Size="@ButtonSize.Small" Danger>停止</Button>
+                            </Popconfirm>
+                        </SpaceItem>
+                        <SpaceItem>
+                            <Button Size="@ButtonSize.Small" OnClick="@(() => ServiceAction(context.Name, "restart"))">重启</Button>
+                        </SpaceItem>
+                        <SpaceItem>
+                            <Button Size="@ButtonSize.Small" OnClick="() => ServiceLogs(context.Name)">日志</Button>
+                        </SpaceItem>
+                    </Space>
+                </ActionColumn>
+            </Table>
+
+            <Divider />
+            <Space>
+                <SpaceItem><Button Type="@ButtonType.Primary" Icon="@IconType.Outline.PlayCircle" OnClick="@(() => StackAction("up"))">启动整栈</Button></SpaceItem>
+                <SpaceItem>
+                    <Popconfirm Title="停止整个应用栈？" OnConfirm='() => StackAction("down")'>
+                        <Button Danger Icon="@IconType.Outline.PauseCircle">停止整栈</Button>
+                    </Popconfirm>
+                </SpaceItem>
+                <SpaceItem><Button OnClick="@(() => StackAction("restart"))">重启整栈</Button></SpaceItem>
+                <SpaceItem><Button OnClick="@(() => StackAction("pull"))">拉取镜像</Button></SpaceItem>
+            </Space>
+        </TabPane>
+
+        @if (Project.IsManaged)
+        {
+            <TabPane Key="editor" Tab="配置编辑">
+                <div style="margin-bottom: 8px;">
+                    <Space>
+                        <SpaceItem><Button Type="@ButtonType.Primary" OnClick="SaveConfig">保存并校验</Button></SpaceItem>
+                        <SpaceItem><Button OnClick="ValidateConfig">仅校验</Button></SpaceItem>
+                    </Space>
+                </div>
+                <TextArea Rows="28" @bind-Value="@_configContent"
+                          Placeholder="services:&#10;  web:&#10;    image: nginx&#10;    ports:&#10;      - &quot;8080:80&quot;"
+                          Style="font-family: monospace; font-size: 13px;" />
+            </TabPane>
+        }
+
+        <TabPane Key="logs" Tab="日志输出">
+            <div style="margin-bottom: 8px;">
+                <Space>
+                    <SpaceItem>
+                        <Button OnClick="LoadLogs">刷新日志</Button>
+                    </SpaceItem>
+                    <SpaceItem>
+                        <Select @bind-Value="@_logsService" TItem="string" TItemValue="string"
+                                Placeholder="整栈" Style="width: 200px;" AllowClear>
+                            <SelectOptions>
+                                @foreach (var svc in Project.Services)
+                                {
+                                    <SelectOption TItem="string" TItemValue="string" Value="@svc.Name" Label="@svc.Name" />
+                                }
+                            </SelectOptions>
+                        </Select>
+                    </SpaceItem>
+                </Space>
+            </div>
+            <pre Style="background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 4px; max-height: 480px; overflow: auto; font-size: 12px;">@(_logsContent ?? "点击刷新日志查看输出")</pre>
+        </TabPane>
+
+        <TabPane Key="output" Tab="命令输出">
+            <pre Style="background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 4px; max-height: 480px; overflow: auto; font-size: 12px;">@(_commandOutput ?? "暂无输出")</pre>
+        </TabPane>
+    </Tabs>
+}
+
+@code {
+    [Parameter] public string Name { get; set; } = string.Empty;
+
+    [SupplyParameterFromQuery] public string? New { get; set; }
+    [SupplyParameterFromQuery] public string? Host { get; set; }
+
+    private ComposeProject? Project;
+    private bool _loading = true;
+
+    private string _configContent = string.Empty;
+    private string? _logsContent;
+    private string? _logsService;
+    private string? _commandOutput;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Refresh();
+
+        var isNew = New == "1";
+        var hostId = Host;
+
+        if (isNew && Project != null && Project.IsManaged)
+        {
+            // Seed an empty stack with a minimal template so the editor is not blank.
+            _configContent = """
+                services:
+                  app:
+                    image: hello-world
+                """;
+        }
+        else if (Project != null && Project.IsManaged)
+        {
+            var content = await ComposeService.ReadStackFileAsync(Name);
+            _configContent = content ?? string.Empty;
+        }
+
+        if (isNew && !string.IsNullOrEmpty(hostId) && Project != null && !Project.IsManaged)
+        {
+            // A brand-new managed stack: save the template so it exists on disk.
+            var result = await ComposeService.SaveStackFileAsync(Name, _configContent, hostId);
+            if (result.Success)
+            {
+                Message.Success("应用栈已创建，请编辑 compose 配置");
+                await Refresh();
+            }
+            else
+            {
+                Message.Error($"创建失败: {result.Output}");
+            }
+        }
+    }
+
+    private async Task Refresh()
+    {
+        _loading = true;
+        try
+        {
+            Project = await ComposeService.GetProjectAsync(Name);
+        }
+        catch (Exception ex)
+        {
+            Message.Error($"加载失败: {ex.Message}");
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task SaveConfig()
+    {
+        var hostId = Project?.HostId;
+        var result = await ComposeService.SaveStackFileAsync(Name, _configContent, hostId);
+        if (result.Success)
+        {
+            Message.Success("配置校验通过并已保存");
+            await Refresh();
+        }
+        else
+        {
+            Message.Error($"保存失败: {result.Output}");
+        }
+    }
+
+    private async Task ValidateConfig()
+    {
+        // Validate without persisting by writing to the candidate path the service uses.
+        var result = await ComposeService.SaveStackFileAsync(Name, _configContent, Project?.HostId);
+        if (result.Success)
+        {
+            Message.Success("配置校验通过");
+        }
+        else
+        {
+            _commandOutput = result.Output;
+            Message.Error("校验未通过，查看「命令输出」标签页");
+        }
+    }
+
+    private async Task StackAction(string verb)
+    {
+        ComposeCommandResult result = verb switch
+        {
+            "up" => await ComposeService.UpAsync(Name),
+            "down" => await ComposeService.DownAsync(Name),
+            "restart" => await ComposeService.RestartAsync(Name),
+            "pull" => await ComposeService.PullAsync(Name),
+            _ => new ComposeCommandResult { Success = false, Output = "未知操作" }
+        };
+
+        _commandOutput = $"$ docker compose {verb}\n\n{result.Output}";
+        Message.Success(result.Success ? "操作完成" : "操作失败");
+        await Refresh();
+    }
+
+    private async Task ServiceAction(string service, string verb)
+    {
+        ComposeCommandResult result = verb switch
+        {
+            "start" => await ComposeService.StartAsync(Name, service),
+            "stop" => await ComposeService.StopAsync(Name, service),
+            "restart" => await ComposeService.RestartAsync(Name, service),
+            _ => new ComposeCommandResult { Success = false, Output = "未知操作" }
+        };
+
+        _commandOutput = $"$ docker compose {verb} {service}\n\n{result.Output}";
+        Message.Success(result.Success ? "操作完成" : "操作失败");
+        await Refresh();
+    }
+
+    private async Task LoadLogs()
+    {
+        var result = await ComposeService.LogsAsync(Name, _logsService, 200);
+        _logsContent = result.Output;
+    }
+
+    private async Task ServiceLogs(string service)
+    {
+        _logsService = service;
+        await LoadLogs();
+    }
+
+    private void GoBack()
+    {
+        Navigation.NavigateTo("/compose");
+    }
+}
