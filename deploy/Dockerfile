@@ -21,21 +21,31 @@ ARG ACME_SH_SHA256=e5f8e187bbf5251e0cd8891f2622daab9850366bd17bea9f92c2fe2ee091f
 # Install nginx with stream module, curl, and the docker CLI + compose plugin.
 # The docker CLI lets the panel drive `docker compose` against the host daemon
 # through the mounted socket; compose is invoked as a subprocess, not re-implemented.
+# The distro id is read from the base image rather than hardcoded: the .NET runtime
+# images have moved between Debian and Ubuntu, and download.docker.com keeps a
+# separate repository per distro, so a wrong pairing 404s and fails apt-get update.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         nginx libnginx-mod-stream curl ca-certificates gnupg openssl && \
     install -m 0755 -d /etc/apt/keyrings && \
-    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc && \
+    DISTRO_ID="$(. /etc/os-release && echo "$ID")" && \
+    DISTRO_CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")" && \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 --max-time 120 \
+        "https://download.docker.com/linux/${DISTRO_ID}/gpg" -o /etc/apt/keyrings/docker.asc && \
     chmod a+r /etc/apt/keyrings/docker.asc && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${DISTRO_ID} ${DISTRO_CODENAME} stable" \
         > /etc/apt/sources.list.d/docker.list && \
+    echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
     apt-get update && apt-get install -y --no-install-recommends \
         docker-ce-cli docker-compose-plugin && \
     rm -rf /var/lib/apt/lists/*
 
 # DNS-01 providers are maintained by acme.sh. Pin the release instead of
 # executing its online installer; NCPM drives issuance and renewal itself.
+# The checksum below is what makes retrying safe: a truncated or substituted
+# tarball fails sha256sum rather than being unpacked.
 RUN mkdir -p /opt/acme.sh && \
-    curl -fsSL "https://github.com/acmesh-official/acme.sh/archive/refs/tags/${ACME_SH_VERSION}.tar.gz" \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 --max-time 300 \
+        "https://github.com/acmesh-official/acme.sh/archive/refs/tags/${ACME_SH_VERSION}.tar.gz" \
         -o /tmp/acme-sh.tar.gz && \
     echo "${ACME_SH_SHA256}  /tmp/acme-sh.tar.gz" | sha256sum -c - && \
     tar -xzf /tmp/acme-sh.tar.gz --strip-components=1 -C /opt/acme.sh && \
