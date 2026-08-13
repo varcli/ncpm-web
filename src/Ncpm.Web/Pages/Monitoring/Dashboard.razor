@@ -37,7 +37,7 @@
 
 <Card Title="容器实时资源" Style="margin-top: 16px;">
     <Table TItem="ContainerMetrics" DataSource="@_containerMetrics" RowKey="x => x.ContainerId"
-           Pagination="false" Size="@TableSize.Small">
+           HidePagination="true" Size="@TableSize.Small">
         <PropertyColumn Property="x => x.Name" Title="容器" />
         <PropertyColumn Property="x => x.HostName" Title="Docker 主机" />
         <PropertyColumn Property="x => x.CpuUsage" Title="CPU">

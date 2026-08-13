@@ -123,14 +123,19 @@
                 {
                     @foreach (var field in provider.Fields)
                     {
+                        // Resolve the entry here rather than indexing inside the bind
+                        // expression: FormItem feeds ValueExpression to
+                        // FieldIdentifier.Create, which cannot evaluate a method call
+                        // used as an index argument and throws while rendering.
+                        var credential = _dnsCredentials[CredentialKey(provider.Name, field.Name)];
                         <FormItem Label="@field.DisplayName">
                             @if (field.Secret)
                             {
-                                <InputPassword @bind-Value="@_dnsCredentials[CredentialKey(provider.Name, field.Name)]" Placeholder="@field.Placeholder" />
+                                <InputPassword @bind-Value="@credential.Value" Placeholder="@field.Placeholder" />
                             }
                             else
                             {
-                                <Input @bind-Value="@_dnsCredentials[CredentialKey(provider.Name, field.Name)]" Placeholder="@field.Placeholder" />
+                                <Input @bind-Value="@credential.Value" Placeholder="@field.Placeholder" />
                             }
                         </FormItem>
                     }
@@ -173,7 +178,17 @@
     private bool _acmeVisible;
     private AcmeConfig _acmeConfig = new();
     private string _acmeDomainsText = string.Empty;
-    private Dictionary<string, string> _dnsCredentials = new();
+
+    // Values are boxed in a class so each input binds to a plain property. Binding
+    // straight at a dictionary entry would make ValueExpression an index expression,
+    // which FieldIdentifier.Create rejects. Keyed by provider so switching providers
+    // in the form keeps whatever was already typed for the others.
+    private Dictionary<string, DnsCredentialValue> _dnsCredentials = new();
+
+    private sealed class DnsCredentialValue
+    {
+        public string Value { get; set; } = string.Empty;
+    }
 
     protected override void OnInitialized()
     {
@@ -249,7 +264,7 @@
         _acmeDomainsText = string.Empty;
         _dnsCredentials = AcmeService.GetDnsProviders()
             .SelectMany(provider => provider.Fields.Select(field => CredentialKey(provider.Name, field.Name)))
-            .ToDictionary(name => name, _ => string.Empty, StringComparer.Ordinal);
+            .ToDictionary(name => name, _ => new DnsCredentialValue(), StringComparer.Ordinal);
         _acmeVisible = true;
     }
 
@@ -276,7 +291,7 @@
 
             _acmeConfig.DnsCredentials = provider.Fields.ToDictionary(
                 field => field.Name,
-                field => _dnsCredentials[CredentialKey(provider.Name, field.Name)],
+                field => _dnsCredentials[CredentialKey(provider.Name, field.Name)].Value,
                 StringComparer.Ordinal);
         }
         else

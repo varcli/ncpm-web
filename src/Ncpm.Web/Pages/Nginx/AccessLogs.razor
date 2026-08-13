@@ -121,7 +121,7 @@
                 @if (_analysis.TopPaths.Any())
                 {
                     <Table TItem="NameCount" DataSource="@_analysis.TopPaths" Size="@TableSize.Small"
-                           Pagination="false" RowKey="x => x.Name">
+                           HidePagination="true" RowKey="x => x.Name">
                         <PropertyColumn Property="x => x.Name" Title="路径">
                             <Text Style="font-family: monospace; font-size: 12px;" Ellipsis>@context.Name</Text>
                         </PropertyColumn>
@@ -139,7 +139,7 @@
                 @if (_analysis.TopUserAgents.Any())
                 {
                     <Table TItem="NameCount" DataSource="@_analysis.TopUserAgents" Size="@TableSize.Small"
-                           Pagination="false" RowKey="x => x.Name">
+                           HidePagination="true" RowKey="x => x.Name">
                         <PropertyColumn Property="x => x.Name" Title="User-Agent">
                             <Text Style="font-size: 12px;" Ellipsis>@context.Name</Text>
                         </PropertyColumn>

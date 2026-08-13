@@ -3,6 +3,7 @@
 @using Ncpm.Data
 @using Ncpm.Services
 @attribute [Authorize]
+@implements IReuseTabsPage
 @inject DockerService DockerService
 @inject IMessageService Message
 
@@ -160,6 +161,15 @@
     public string? Host { get; set; }
 
     [Inject] private NavigationManager Navigation { get; set; } = default!;
+    [Inject] private ReuseTabsService TabService { get; set; } = default!;
+
+    // This route is not in the layout menu, so ReuseTabs has no MenuDataItem to
+    // borrow a title from and falls back to the raw URL — a 64-char container id
+    // that fills the entire tab bar. Mirror the PageHeader instead.
+    public RenderFragment GetPageTitle() => @<span>容器: @(_container?.Name ?? ShortContainerId)</span>;
+
+    private string ShortContainerId =>
+        ContainerId.Length > 12 ? ContainerId[..12] : ContainerId;
 
     private DockerContainer? _container;
     private bool _loading = true;
@@ -197,6 +207,9 @@
         finally
         {
             _loading = false;
+            // The tab is created before the container loads, so its title starts
+            // as the short id; refresh it once the real name is known.
+            TabService.Update();
         }
     }
 

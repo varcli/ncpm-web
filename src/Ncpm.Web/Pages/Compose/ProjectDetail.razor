@@ -3,6 +3,7 @@
 @using Ncpm.Data
 @using Ncpm.Services
 @attribute [Authorize]
+@implements IReuseTabsPage
 @inject ComposeService ComposeService
 @inject DockerService DockerService
 @inject IMessageService Message
@@ -130,6 +131,10 @@ else
 
     [SupplyParameterFromQuery] public string? New { get; set; }
     [SupplyParameterFromQuery] public string? Host { get; set; }
+
+    // Not a menu route, so ReuseTabs would otherwise label the tab with the raw
+    // URL. The project name comes from the route, so no reload is needed.
+    public RenderFragment GetPageTitle() => @<span>应用栈: @Name</span>;
 
     private ComposeProject? Project;
     private bool _loading = true;

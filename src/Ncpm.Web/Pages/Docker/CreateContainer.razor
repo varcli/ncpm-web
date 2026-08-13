@@ -3,6 +3,7 @@
 @using Ncpm.Data
 @using Ncpm.Services
 @attribute [Authorize]
+@attribute [ReuseTabsPage(Title = "创建容器")]
 @inject DockerService DockerService
 @inject IMessageService Message
 @inject NavigationManager Navigation

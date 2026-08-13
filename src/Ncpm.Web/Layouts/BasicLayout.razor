@@ -6,35 +6,46 @@
 @inject NavigationManager Navigation
 @inject Ncpm.Services.ConfigService ConfigService
 
-<AntDesign.ProLayout.BasicLayout 
-    Logo="@("/assets/logo.svg")"
-    MenuData="_menuData"
-    MenuAccordion
-    @bind-Collapsed="collapsed">
-    <HeaderContentRender>
-        <Space Size="@("24")">
-            <SpaceItem>
-                <Icon Class="action" Type="@(collapsed?"menu-unfold":"menu-fold")" OnClick="Toggle" />
-            </SpaceItem>
-            <SpaceItem>
-                <Icon Class="action" Type="reload" Theme="@IconThemeType.Outline" OnClick="Reload" />
-            </SpaceItem>
-        </Space>
-    </HeaderContentRender>
-    <RightContentRender>
-        <Button Type="@ButtonType.Link" Icon="@IconType.Outline.Logout" OnClick="Logout">
-            退出登录
-        </Button>
-    </RightContentRender>
-    <ChildContent>
-        <ReuseTabs></ReuseTabs>
-    </ChildContent>
-    <FooterRender>
-        <FooterView Copyright="@($"{DateTime.Now.Year} NCPM · Container & Proxy Control")" Links="Links"></FooterView>
-    </FooterRender>
-</AntDesign.ProLayout.BasicLayout>
+@* AuthorizeRouteView renders its NotAuthorized content inside this layout, so
+   without this gate the whole workbench shell — sidebar, every menu entry, header —
+   paints for an anonymous visitor while RedirectToLogin is still navigating away.
+   AuthorizeView renders nothing until the state resolves, so there is no flash. *@
+<AuthorizeView Context="auth">
+    <Authorized>
+        <AntDesign.ProLayout.BasicLayout
+            Logo="@("/assets/logo.svg")"
+            MenuData="_menuData"
+            MenuAccordion
+            @bind-Collapsed="collapsed">
+            <HeaderContentRender>
+                <Space Size="@("24")">
+                    <SpaceItem>
+                        <Icon Class="action" Type="@(collapsed?"menu-unfold":"menu-fold")" OnClick="Toggle" />
+                    </SpaceItem>
+                    <SpaceItem>
+                        <Icon Class="action" Type="reload" Theme="@IconThemeType.Outline" OnClick="Reload" />
+                    </SpaceItem>
+                </Space>
+            </HeaderContentRender>
+            <RightContentRender>
+                <Button Type="@ButtonType.Link" Icon="@IconType.Outline.Logout" OnClick="Logout">
+                    退出登录
+                </Button>
+            </RightContentRender>
+            <ChildContent>
+                <ReuseTabs></ReuseTabs>
+            </ChildContent>
+            <FooterRender>
+                <FooterView Copyright="@($"{DateTime.Now.Year} NCPM · Container & Proxy Control")" Links="Links"></FooterView>
+            </FooterRender>
+        </AntDesign.ProLayout.BasicLayout>
 
-<SettingDrawer />
+        <SettingDrawer />
+    </Authorized>
+    <NotAuthorized>
+        @* Deliberately empty: Routes.razor drives the redirect to /login. *@
+    </NotAuthorized>
+</AuthorizeView>
 
 @code{
     bool collapsed;
