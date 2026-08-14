@@ -11,17 +11,6 @@ RUN dotnet restore src/Ncpm.Web/Ncpm.Web.csproj
 COPY src/Ncpm.Web/ src/Ncpm.Web/
 RUN dotnet publish src/Ncpm.Web/Ncpm.Web.csproj -c Release --no-restore -o /app/publish
 
-# The Blazor Server bootstrap script is supplied by the SDK-matched internal
-# assets package. Some Linux SDK builds retain it in the package cache instead
-# of copying it to the publish web root, which leaves the panel page blank.
-# Install that exact restored version so the runtime image is self-contained.
-RUN BLAZOR_SERVER_JS="$(find /root/.nuget/packages/microsoft.aspnetcore.app.internal.assets \
-        -type f -path '*/_framework/blazor.server.js' -print -quit)" && \
-    test -n "${BLAZOR_SERVER_JS}" && \
-    install -D -m 0644 "${BLAZOR_SERVER_JS}" \
-        /app/publish/wwwroot/_framework/blazor.server.js && \
-    test -s /app/publish/wwwroot/_framework/blazor.server.js
-
 # Runtime stage
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
@@ -102,8 +91,7 @@ EXPOSE 8098 80 443
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-    CMD curl -fsS -o /dev/null http://localhost:8098/health && \
-        curl -fsS -o /dev/null http://localhost:8098/_framework/blazor.server.js || exit 1
+    CMD curl -f http://localhost:8098/health || exit 1
 
 # Start nginx first, then keep the panel as PID 1 so container signals and exit
 # codes follow the managed application.

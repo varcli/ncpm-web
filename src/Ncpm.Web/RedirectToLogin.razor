@@ -2,10 +2,13 @@
 @inject NavigationManager Navigation
 
 @code {
-    protected override void OnInitialized()
+    protected override void OnAfterRender(bool firstRender)
     {
-        // forceLoad: the login page uses a different layout, so a full reload
-        // avoids rendering it inside the authenticated shell.
-        Navigation.NavigateTo("/login", true);
+        // Navigation requires the interactive circuit. During server prerendering
+        // the authentication provider cannot read browser local storage yet, so
+        // redirecting from OnInitialized can trigger an unnecessary full reload
+        // before the real client authentication state is known.
+        if (firstRender)
+            Navigation.NavigateTo("/login", replace: true);
     }
 }
