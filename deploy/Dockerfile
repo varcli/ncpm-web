@@ -10,7 +10,17 @@ RUN dotnet restore src/Ncpm.Web/Ncpm.Web.csproj
 # Copy everything and build
 COPY src/Ncpm.Web/ src/Ncpm.Web/
 RUN dotnet publish src/Ncpm.Web/Ncpm.Web.csproj -c Release --no-restore -o /app/publish
-RUN test -s /app/publish/wwwroot/_framework/blazor.server.js
+
+# The Blazor Server bootstrap script is supplied by the SDK-matched internal
+# assets package. Some Linux SDK builds retain it in the package cache instead
+# of copying it to the publish web root, which leaves the panel page blank.
+# Install that exact restored version so the runtime image is self-contained.
+RUN BLAZOR_SERVER_JS="$(find /root/.nuget/packages/microsoft.aspnetcore.app.internal.assets \
+        -type f -path '*/_framework/blazor.server.js' -print -quit)" && \
+    test -n "${BLAZOR_SERVER_JS}" && \
+    install -D -m 0644 "${BLAZOR_SERVER_JS}" \
+        /app/publish/wwwroot/_framework/blazor.server.js && \
+    test -s /app/publish/wwwroot/_framework/blazor.server.js
 
 # Runtime stage
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
