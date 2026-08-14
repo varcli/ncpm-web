@@ -43,7 +43,11 @@
         <SettingDrawer />
     </Authorized>
     <NotAuthorized>
-        @* Deliberately empty: Routes.razor drives the redirect to /login. *@
+        @* Render Body without the workbench chrome. Body is whatever
+           AuthorizeRouteView produced for the unauthorized case — RedirectToLogin,
+           or the "no permission" notice — so the redirect still runs. Leaving this
+           empty would close the bypass but strand the visitor on a blank page. *@
+        @Body
     </NotAuthorized>
 </AuthorizeView>
 
