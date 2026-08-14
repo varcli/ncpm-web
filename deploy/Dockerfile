@@ -10,6 +10,7 @@ RUN dotnet restore src/Ncpm.Web/Ncpm.Web.csproj
 # Copy everything and build
 COPY src/Ncpm.Web/ src/Ncpm.Web/
 RUN dotnet publish src/Ncpm.Web/Ncpm.Web.csproj -c Release --no-restore -o /app/publish
+RUN test -s /app/publish/wwwroot/_framework/blazor.server.js
 
 # Runtime stage
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
@@ -91,7 +92,8 @@ EXPOSE 8098 80 443
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-    CMD curl -f http://localhost:8098/health || exit 1
+    CMD curl -fsS -o /dev/null http://localhost:8098/health && \
+        curl -fsS -o /dev/null http://localhost:8098/_framework/blazor.server.js || exit 1
 
 # Start nginx first, then keep the panel as PID 1 so container signals and exit
 # codes follow the managed application.

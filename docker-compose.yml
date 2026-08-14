@@ -45,7 +45,7 @@ services:
       # relative bind mounts (for example /opt/ncpm/data/compose).
       - Compose__HostPathPrefix=${NCPM_COMPOSE_HOST_PATH:-}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8098/health"]
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost:8098/health && curl -fsS -o /dev/null http://localhost:8098/_framework/blazor.server.js"]
       interval: 30s
       timeout: 10s
       retries: 3

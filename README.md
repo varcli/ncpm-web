@@ -71,7 +71,7 @@ DNS 与通知 Token 使用持久化 Data Protection key 加密；会话只保存
 - `/health/live`：面板进程存活。
 - `/health`、`/health/ready`：配置可读且 Nginx 可达；Docker 全部不可用时报告 Degraded。
 
-Docker 镜像的 HEALTHCHECK 使用就绪检查。
+Docker 镜像的 HEALTHCHECK 同时检查就绪状态与 Blazor 启动脚本，避免前端静态资源缺失时容器仍显示健康。
 
 ## 本地开发
 

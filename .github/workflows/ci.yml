@@ -47,3 +47,18 @@ jobs:
 
       - name: Build image
         run: docker build --file deploy/Dockerfile --tag ncpm:ci .
+
+      - name: Smoke test panel assets
+        shell: bash
+        run: |
+          docker run --detach --name ncpm-ci --publish 127.0.0.1:18098:8098 ncpm:ci
+          trap 'docker logs ncpm-ci; docker rm --force ncpm-ci' EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error --output /dev/null \
+              http://127.0.0.1:18098/_framework/blazor.server.js; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Blazor bootstrap asset did not become available" >&2
+          exit 1

@@ -76,9 +76,11 @@ docker compose logs -f panel
 docker exec ncpm-panel nginx -t
 curl -f http://127.0.0.1:8098/health/live
 curl -f http://127.0.0.1:8098/health/ready
+curl -f http://127.0.0.1:8098/_framework/blazor.server.js -o /dev/null
 ```
 
 - `/health/live` 只检查进程。
 - `/health/ready` 检查配置和 Nginx；Docker 不可用时为 Degraded，不会把暂时的 daemon 故障误判成面板进程崩溃。
+- 容器 `HEALTHCHECK` 还会读取 Blazor 启动脚本；该资源缺失时容器会标记为不健康。
 
 完整验收见[上线检查清单](../docs/PRODUCTION-CHECKLIST.md)。OIDC 当前仅为配置草稿，生产环境保持关闭。

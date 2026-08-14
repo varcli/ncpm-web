@@ -213,6 +213,11 @@ app.UseMiddleware<DynamicRateLimitMiddleware>();
 
 app.UseRouting();
 
+// .NET 10 publishes framework and Razor class-library files through the static
+// web asset endpoint manifest. Keep UseStaticFiles above for physical files and
+// map the manifest explicitly so the Blazor bootstrap script is always served
+// from a published/containerized application.
+app.MapStaticAssets();
 app.MapGet("/health/live", () => Results.Ok(new { status = "Healthy" }));
 app.MapHealthChecks("/health");
 app.MapHealthChecks("/health/ready");

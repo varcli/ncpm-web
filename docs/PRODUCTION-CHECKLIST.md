@@ -37,7 +37,7 @@ NCPM 当前适合单节点、自托管环境。上线前逐项确认；OIDC 登�
 
 ## 5. 可观测性与恢复
 
-- [ ] `GET /health/live` 返回 200；`GET /health/ready` 显示 Nginx 就绪，Docker 中断时为 Degraded。
+- [ ] `GET /health/live` 返回 200；`GET /health/ready` 显示 Nginx 就绪，Docker 中断时为 Degraded；`GET /_framework/blazor.server.js` 返回 200。
 - [ ] 日志目录有容量/保留策略，通知渠道测试成功且不会重复投递。
 - [ ] 完整备份 `data/`，并在另一临时目录验证恢复：配置、Data Protection keys、证书和 DNS 凭据必须一起恢复。
 - [ ] 记录当前镜像 `sha-*` 标签；升级失败时可回退镜像并恢复升级前 `data/` 快照。
