@@ -10,43 +10,95 @@
 @inject AuthenticationStateProvider AuthStateProvider
 @inject Ncpm.Services.ConfigService ConfigService
 
-<div style="display: flex; justify-content: center; align-items: center; min-height: 100vh; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
-    <Card Style="width: 400px; box-shadow: 0 8px 32px rgba(0,0,0,0.1);">
-        <div style="text-align: center; margin-bottom: 24px;">
-            <h2 style="margin: 0; color: #333;">Ncpm</h2>
-            <p style="color: #666; margin-top: 8px;">Nginx 反向代理管理面板</p>
+<main class="login-shell">
+    <section class="login-context" aria-label="NCPM 控制平面">
+        <header class="login-brand">
+            <img class="login-brand-mark" src="assets/ncpm-login-logo.png" alt="" aria-hidden="true" />
+            <span>NCPM</span>
+        </header>
+
+        <div class="login-context-copy">
+            <p>集中管理 Nginx 路由、TLS 证书与容器工作负载。</p>
         </div>
 
+        <div class="login-topology" aria-hidden="true">
+            <div class="login-node login-node-entry">
+                <small>ENTRY</small>
+                <strong>:443</strong>
+                <span>TLS</span>
+            </div>
+            <i class="login-route login-route-in"></i>
+            <div class="login-node login-node-core">
+                <small>DATA PLANE</small>
+                <strong>NGINX</strong>
+                <span>ROUTING</span>
+            </div>
+            <i class="login-route login-route-out"></i>
+            <div class="login-upstreams">
+                <span><i></i>APP_01</span>
+                <span><i></i>APP_02</span>
+                <span><i></i>APP_03</span>
+            </div>
+        </div>
+
+        <footer class="login-capabilities">
+            <span><Icon Type="global" /> 反向代理</span>
+            <span><Icon Type="safety-certificate" /> ACME / TLS</span>
+            <span><Icon Type="container" /> Docker</span>
+        </footer>
+    </section>
+
+    <section class="login-access">
+        <div class="login-card">
+            <header class="login-card-header">
+                <div class="login-mobile-brand">
+                    <img class="login-brand-mark" src="assets/ncpm-login-logo.png" alt="" aria-hidden="true" />
+                    <strong>NCPM</strong>
+                </div>
+                <h2>登录控制面板</h2>
+                <p>使用管理员凭据继续。</p>
+            </header>
+
+            <div class="login-form">
         <Form Model="@_loginRequest" OnFinish="HandleLogin">
-            <FormItem>
-                <Input @bind-Value="@_loginRequest.Username" 
+                    <FormItem Class="login-form-item">
+                        <span class="login-field-label">用户名</span>
+                        <Input @bind-Value="@_loginRequest.Username"
                        Placeholder="用户名"
                        Size="@InputSize.Large"
                        Prefix="@(_userIcon)" />
-            </FormItem>
-            <FormItem>
-                <InputPassword @bind-Value="@_loginRequest.Password" 
+                    </FormItem>
+                    <FormItem Class="login-form-item">
+                        <span class="login-field-label">密码</span>
+                        <InputPassword @bind-Value="@_loginRequest.Password"
                                Placeholder="密码"
                                Size="@InputSize.Large"
                                Prefix="@(_lockIcon)" />
-            </FormItem>
-            <FormItem>
-                <Button Type="@ButtonType.Primary" 
+                    </FormItem>
+                    <FormItem Class="login-submit-item">
+                        <Button Class="login-submit"
+                                Type="@ButtonType.Primary"
                         HtmlType="submit" 
                         Block 
                         Size="@ButtonSize.Large"
                         Loading="@_loading">
-                    登录
-                </Button>
-            </FormItem>
+                            进入控制面板 <Icon Type="arrow-right" />
+                        </Button>
+                    </FormItem>
         </Form>
+            </div>
 
-        <Alert Type="@AlertType.Info"
-               ShowIcon="true"
-               Message="首次登录"
-               Description="初始账号由 NCPM_ADMIN_USERNAME/NCPM_ADMIN_PASSWORD 设置；未设置密码时，请从 data/secrets/initial-admin-password 读取一次性初始凭据。" />
-    </Card>
-</div>
+            <aside class="login-first-run">
+                <Icon Type="key" />
+                <div>
+                    <strong>首次登录</strong>
+                    <p>账号由环境变量设置；若未指定密码，请读取 <code>data/secrets/initial-admin-password</code> 中的一次性凭据。</p>
+                </div>
+            </aside>
+
+        </div>
+    </section>
+</main>
 
 @code {
     private LoginRequest _loginRequest = new();

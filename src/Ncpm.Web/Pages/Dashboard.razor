@@ -12,20 +12,21 @@
 @inject Ncpm.Services.NotificationService NotificationService
 @inject NavigationManager Navigation
 
-<PageContainer Title="运行总览">
-    <div class="ops-dashboard">
+<div class="ops-dashboard">
         <section class="ops-command-deck">
-            <div class="ops-command-copy">
-                <span class="ops-eyebrow">NCPM / LIVE CONTROL</span>
-                <h1>@Greeting，基础设施状态@OverallStatusText</h1>
-                <p>代理、容器与证书集中在一个视野。优先处理异常，其余保持安静。</p>
-            </div>
-            <div class="ops-command-actions">
-                <span class="ops-updated">更新于 @(_lastUpdated?.ToString("HH:mm:ss") ?? "--:--:--")</span>
-                <button class="ops-refresh" @onclick="RefreshAsync" disabled="@_loading">
-                    <Icon Type="reload" Spin="@_loading" />
-                    <span>@(_loading ? "正在检查" : "立即检查")</span>
-                </button>
+            <div class="ops-command-toolbar">
+                <div class="ops-overall-status">
+                    <span class="ops-signal-dot @OverallTone"></span>
+                    <span>系统状态</span>
+                    <strong>@OverallStatusText</strong>
+                </div>
+                <div class="ops-command-actions">
+                    <span class="ops-updated">更新于 @(_lastUpdated?.ToString("HH:mm:ss") ?? "--:--:--")</span>
+                    <button class="ops-refresh" @onclick="RefreshAsync" disabled="@_loading">
+                        <Icon Type="reload" Spin="@_loading" />
+                        <span>@(_loading ? "正在检查" : "立即检查")</span>
+                    </button>
+                </div>
             </div>
 
             <div class="ops-signal-rail" aria-label="核心服务状态">
@@ -90,7 +91,6 @@
             <article class="ops-metric">
                 <span>面板内存</span>
                 <strong>@FormatBytes(_panelMemory)</strong>
-                <div class="ops-memory-mark">WORKING SET</div>
                 <p>监控采样每 5 秒刷新</p>
             </article>
         </section>
@@ -98,10 +98,7 @@
         <div class="ops-workspace">
             <section class="ops-panel ops-health-panel">
                 <header class="ops-panel-header">
-                    <div>
-                        <span class="ops-section-kicker">ROUTE PULSE</span>
-                        <h2>上游健康</h2>
-                    </div>
+                    <h2>上游健康</h2>
                     <button class="ops-text-action" @onclick='() => Navigation.NavigateTo("/monitoring/health")'>查看全部 <Icon Type="arrow-right" /></button>
                 </header>
 
@@ -134,11 +131,7 @@
 
             <aside class="ops-panel ops-activity-panel">
                 <header class="ops-panel-header">
-                    <div>
-                        <span class="ops-section-kicker">LIVE ACTIVITY</span>
-                        <h2>最近信号</h2>
-                    </div>
-                    <span class="ops-live"><i></i> LIVE</span>
+                    <h2>最近事件</h2>
                 </header>
 
                 @if (_recentMessages.Count == 0)
@@ -170,10 +163,7 @@
 
         <section class="ops-shortcuts">
             <header class="ops-panel-header">
-                <div>
-                    <span class="ops-section-kicker">QUICK LAUNCH</span>
-                    <h2>开始操作</h2>
-                </div>
+                <h2>常用操作</h2>
             </header>
             <div class="ops-shortcut-grid">
                 <button @onclick='() => Navigation.NavigateTo("/docker/containers")'><Icon Type="container" /><span><strong>管理容器</strong><small>启动、停止、日志与指标</small></span><Icon Type="arrow-right" /></button>
@@ -182,8 +172,7 @@
                 <button @onclick='() => Navigation.NavigateTo("/certificates")'><Icon Type="safety-certificate" /><span><strong>检查证书</strong><small>导入、签发与到期状态</small></span><Icon Type="arrow-right" /></button>
             </div>
         </section>
-    </div>
-</PageContainer>
+</div>
 
 @code {
     private readonly List<ProxyHostHealth> _healthStatuses = new();
@@ -204,15 +193,8 @@
     private string? _nginxError;
     private DateTime? _lastUpdated;
 
-    private string Greeting => DateTime.Now.Hour switch
-    {
-        < 6 => "夜深了",
-        < 12 => "早上好",
-        < 18 => "下午好",
-        _ => "晚上好"
-    };
-
     private string OverallStatusText => _loading ? "正在检查" : HasIncident ? "需要关注" : "运行平稳";
+    private string OverallTone => _loading ? "pending" : HasIncident ? "fault" : "healthy";
     private bool HasIncident => _dockerConnected == false || _nginxOk == false || _unhealthyHosts > 0 || _expiringCertificates > 0;
     private int ContainerRate => Percent(_runningContainers, _totalContainers);
     private int ProxyRate => Percent(_enabledProxyHosts, _proxyHosts);
