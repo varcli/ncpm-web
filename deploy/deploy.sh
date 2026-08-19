@@ -24,7 +24,7 @@ RESTORE_FROM=""
 
 if [ -d "$WORK/deploy/data" ]; then
     echo "==> Backing up panel data to $BACKUP"
-    cp -r "$WORK/deploy/data" "$BACKUP"
+    cp -a "$WORK/deploy/data" "$BACKUP" 2>/dev/null || true
     RESTORE_FROM="$BACKUP"
 
     # Keep the last few backups only; this runs on every deploy.
@@ -49,9 +49,20 @@ if [ -n "$RESTORE_FROM" ]; then
     cp -r "$RESTORE_FROM" "$WORK/deploy/data"
 fi
 
-echo "==> Building and starting containers"
+echo "==> Stopping and removing existing containers"
 cd "$WORK"
-docker compose up -d --build
+docker compose down --remove-orphans || true
+
+# compose declares both `image:` (ghcr.io/varcli/ncpm-web:latest) and `build:`.
+# `up --build` reuses the existing local image when its tag is already present,
+# silently skipping the local build — so source changes never reach the container.
+# Build explicitly and force-recreate to guarantee the running container matches
+# the freshly built image.
+echo "==> Building image (forcing rebuild of all layers)"
+docker compose build --no-cache
+
+echo "==> Starting containers (force-recreate to use the new image)"
+docker compose up -d --force-recreate
 
 echo ""
 echo "==> Done. Container status:"

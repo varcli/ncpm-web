@@ -9,7 +9,14 @@ RUN dotnet restore src/Ncpm.Web/Ncpm.Web.csproj
 
 # Copy everything and build
 COPY src/Ncpm.Web/ src/Ncpm.Web/
-RUN dotnet publish src/Ncpm.Web/Ncpm.Web.csproj -c Release --no-restore -o /app/publish
+# Wipe stale build intermediates before publishing. .NET 10's static web asset
+# pipeline (which emits the _framework directory) is sensitive to leftover obj/
+# state from a prior `dotnet restore`: with stale intermediates present, publish
+# silently skips regenerating _framework even though project.assets.json still
+# references it, and the container ends up missing blazor.server.js. Removing
+# obj/bin forces a clean rebuild of the asset manifest on every image build.
+RUN rm -rf src/Ncpm.Web/obj src/Ncpm.Web/bin
+RUN dotnet publish src/Ncpm.Web/Ncpm.Web.csproj -c Release -o /app/publish
 
 # Runtime stage
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
